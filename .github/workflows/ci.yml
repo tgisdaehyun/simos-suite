@@ -32,6 +32,7 @@ jobs:
   build-exe:
     name: Build Windows EXE (x86)
     needs: test
+    if: github.event_name == 'push'   # build/publish the release only on push to main, never on PRs
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
