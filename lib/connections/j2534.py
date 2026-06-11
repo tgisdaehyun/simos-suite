@@ -15,6 +15,18 @@ from enum import Enum
 import logging
 
 
+def _pe_arch_bits(path):
+    """Return 32, 64, or None for a Windows DLL/EXE (reads the PE Machine field)."""
+    try:
+        import struct
+        with open(path, "rb") as f:
+            f.seek(0x3C); pe_off = struct.unpack("<I", f.read(4))[0]
+            f.seek(pe_off + 4); machine = struct.unpack("<H", f.read(2))[0]
+        return {0x14C: 32, 0x8664: 64}.get(machine)
+    except Exception:
+        return None
+
+
 class PASSTHRU_MSG(Structure):
     _fields_ = [
         ("ProtocolID", c_ulong),
@@ -70,7 +82,23 @@ class J2534:
         dll_dir = str(pathlib.Path(windll).parent)
         if hasattr(os, 'add_dll_directory'):
             os.add_dll_directory(dll_dir)  # Python 3.8+ Windows only
-        self.hDLL = ctypes.cdll.LoadLibrary(windll)
+        try:
+            self.hDLL = ctypes.cdll.LoadLibrary(windll)
+        except OSError as e:
+            # WinError 193 = "%1 is not a valid Win32 application" = a 32/64-bit
+            # mismatch between this process and the J2534 DLL. Classic cables
+            # (Tactrix, Mongoose, VNCI) ship 32-bit DLLs; the published EXE is 64-bit.
+            if getattr(e, "winerror", None) == 193:
+                import sys
+                proc = 64 if sys.maxsize > 2**32 else 32
+                dll = _pe_arch_bits(windll)
+                raise OSError(
+                    f"Cannot load J2534 DLL '{windll}': architecture mismatch — this "
+                    f"process is {proc}-bit but the DLL is {dll or 'a different'}-bit. "
+                    f"Run from a {dll or 'matching'}-bit Python, or use a {proc}-bit "
+                    f"J2534 (SL1 ESP32 shim) or the ESP32 BLE/USB bridge."
+                ) from e
+            raise
         self.rxid = rxid.to_bytes(4, "big")
         self.txid = txid.to_bytes(4, "big")
 

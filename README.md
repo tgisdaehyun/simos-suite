@@ -132,10 +132,13 @@ it to GitHub Releases automatically.
 |-----------|------|-------|
 | ESP32 BLE bridge | `BLE` | [dspl1236/esp32-isotp-ble-bridge-c7vag](https://github.com/dspl1236/esp32-isotp-ble-bridge-c7vag). Scan by GATT UUID 0xABF0. |
 | ESP32 USB bridge | `USBISOTP` | Same hardware, USB-C. Auto-detected by VID:PID (CP210x 10C4:EA60 or CH340 1A86:7523). |
-| Tactrix OpenPort 2.0 | `J2534` | Recommended for block flashes. |
-| Mongoose/Drew Tech | `J2534` | Works well. |
-| VNCI 6154A | `J2534` | Good for read/probe. |
+| SL1 J2534 (ESP32 shim) | `J2534` | Switchleg1 J2534 shim over the ESP32 bridge — ships a **64-bit** DLL, so it works from the x64 EXE. |
+| Tactrix OpenPort 2.0 | `J2534` | **32-bit DLL** — run from a 32-bit Python (see note). Good for block flashes. |
+| Mongoose / Drew Tech | `J2534` | **32-bit DLL** — 32-bit Python only. ⚠️ On Win11 the `dtmonpro.sys` kernel driver may be blocked by the WHQL driver-signing policy. |
+| VNCI 6154A | `J2534` | **Untested.** Must register under `PassThruSupport.04.04`; some clones only work through their own VCI Manager. |
 | SocketCAN | `SocketCAN_can0` | Linux only. Requires `iso-tp` kernel module. |
+
+> **J2534 architecture note:** the published **EXE is 64-bit**, so it can only load **64-bit** J2534 DLLs. Classic cables (Tactrix, Mongoose, VNCI) ship **32-bit** DLLs and fail to load in the EXE with `WinError 193` — run those from a **32-bit Python** (`python -m ui`). For the EXE, use the **ESP32 bridge (BLE/USB)** or the 64-bit **SL1** shim.
 
 ---
 
