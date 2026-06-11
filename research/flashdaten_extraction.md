@@ -60,14 +60,14 @@ All 7 files produce identical SA2:
 - FL_4H0907468E__0204.frf, FL_4H0907468E__0204_S.frf
 - FL_4H0907468F__0213_S.frf
 
-**CRITICAL BUG IN ecu_defs.py**: The J533_LEAR.sa2_script is **WRONG**. It currently contains the Simos8.5 SA2 (40 bytes) instead of the actual J533 gateway SA2 (12 bytes).
+**✅ RESOLVED** (was a bug, now fixed in code): `J533_LEAR.sa2_script` in `ecu_defs.py` now holds the correct 12-byte J533 gateway SA2. It had previously contained the Simos8.5 SA2 (40 bytes) by mistake.
 
 | | Value |
 |---|---|
-| **ecu_defs.py J533_LEAR** (WRONG) | `6805824A10680493300419624A05871510197082499324041966824A058702031970824A0181494C` |
-| **Correct J533 SA2** (from flashdaten) | `6805814A05870A22128A494C` |
+| **ecu_defs.py J533_LEAR** (was, WRONG) | `6805824A10680493300419624A05871510197082499324041966824A058702031970824A0181494C` |
+| **Correct J533 SA2** (now in code, from flashdaten) | `6805814A05870A22128A494C` |
 
-The comment block at line 149 correctly states "Both return identical SA2: 6805814A05870A22128A494C" but the actual bytes.fromhex() on line 176 uses the Simos8.5 value. The conflicting comment on line 172 says "SA2 script CONFIRMED from FL_4G0907551D__0006.frf" which is a Simos8.5 ECU file.
+`ecu_defs.py:175` now uses `bytes.fromhex("6805814A05870A22128A494C")`, matching the comment block at line 149 and the 7 J533 gateway FRF files; the inline comment at lines 171–174 documents the fix.
 
 **EXPECTED-IDENT part numbers from ODX**:
 | File | Part Number | SW Version | HW Version |

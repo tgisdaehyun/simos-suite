@@ -36,6 +36,9 @@ try:
 except ImportError:
     _WS_AVAILABLE = False
 
+from udsoncan.connections import BaseConnection
+from udsoncan.exceptions import TimeoutException
+
 log = logging.getLogger(__name__)
 
 BLE_HEADER_ID  = 0xF1
@@ -75,26 +78,38 @@ def detect_funkbridge_url(timeout: float = 2.0) -> Optional[str]:
     return None
 
 
-class WSBridgeConnection:
+class WSBridgeConnection(BaseConnection):
     """
     udsoncan-compatible connection over WebSocket.
     Drop-in replacement for BLEBridgeConnection.
+
+    Subclasses ``udsoncan.connections.BaseConnection``: ``udsoncan.Client``
+    drives it through ``send()`` / ``wait_frame()`` (provided by the base),
+    which delegate to the ``specific_send`` / ``specific_wait_frame`` below.
     """
 
     def __init__(self, bridge: "WSBridge", rx_id: int, tx_id: int,
-                 timeout: float = DEFAULT_TIMEOUT):
+                 timeout: float = DEFAULT_TIMEOUT, name: Optional[str] = None):
+        BaseConnection.__init__(self, name)
         self._bridge  = bridge
         self._rx_id   = rx_id
         self._tx_id   = tx_id
         self._timeout = timeout
         self._queue: Optional[queue.Queue] = None
+        self._opened = False
 
-    def open(self):
+    def open(self) -> "WSBridgeConnection":
         self._queue = self._bridge.register_channel(self._tx_id, self._rx_id)
+        self._opened = True
+        return self
 
-    def close(self):
+    def close(self) -> None:
         self._bridge.unregister_channel(self._tx_id, self._rx_id)
         self._queue = None
+        self._opened = False
+
+    def is_open(self) -> bool:
+        return self._opened
 
     def __enter__(self):
         self.open()
@@ -103,17 +118,18 @@ class WSBridgeConnection:
     def __exit__(self, *args):
         self.close()
 
-    def send(self, payload: bytes):
+    def specific_send(self, payload: bytes, timeout: Optional[float] = None) -> None:
+        # timeout is unused: WSBridge.send_frame writes synchronously to the socket.
         self._bridge.send_frame(self._tx_id, self._rx_id, payload)
 
-    def wait_frame(self, timeout: Optional[float] = None) -> bytes:
+    def specific_wait_frame(self, timeout: Optional[float] = None) -> Optional[bytes]:
         t = timeout if timeout is not None else self._timeout
         if self._queue is None:
             raise ConnectionError("Connection not open")
         try:
             frame = self._queue.get(timeout=t)
         except queue.Empty:
-            raise TimeoutError(
+            raise TimeoutException(
                 f"No WebSocket response within {t}s "
                 f"(tx={self._tx_id:#06x} rx={self._rx_id:#06x})"
             )
@@ -121,7 +137,20 @@ class WSBridgeConnection:
             raise ConnectionError("WebSocket bridge disconnected")
         return frame
 
+    def empty_rxqueue(self) -> None:
+        if self._queue is not None:
+            while not self._queue.empty():
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+
+    # ── Backward-compat shim (pre-BaseConnection public surface) ─────────
+    # No in-tree caller uses this; kept for out-of-tree code. Do NOT redefine
+    # send()/wait_frame() here — those are the BaseConnection methods that
+    # udsoncan.Client relies on; overriding them would break the client.
     def empty(self) -> bool:
+        """Legacy: True if the rx queue is empty (does not drain)."""
         return self._queue is None or self._queue.empty()
 
 

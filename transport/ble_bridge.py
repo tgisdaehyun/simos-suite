@@ -72,6 +72,9 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+from udsoncan.connections import BaseConnection
+from udsoncan.exceptions import TimeoutException
+
 log = logging.getLogger("SimosSuite.BLE")
 
 # ─── UUIDs (confirmed from firmware ble_server.c) ────────────────────────────
@@ -420,48 +423,76 @@ class BLEBridge:
 
 # ─── BLEBridgeConnection — udsoncan interface ─────────────────────────────────
 
-class BLEBridgeConnection:
+class BLEBridgeConnection(BaseConnection):
     """
     udsoncan-compatible connection backed by BLEBridge.
     Drop-in for IsoTPSocketConnection or J2534Connection.
+
+    Subclasses ``udsoncan.connections.BaseConnection``: ``udsoncan.Client``
+    drives it through ``send()`` / ``wait_frame()`` (provided by the base),
+    which delegate to the ``specific_send`` / ``specific_wait_frame`` below.
     """
 
     def __init__(self, bridge: BLEBridge, rx_id: int, tx_id: int,
-                 timeout: float = 5.0):
+                 timeout: float = 5.0, name: Optional[str] = None):
+        BaseConnection.__init__(self, name)
         self._bridge  = bridge
         self._rx_id   = rx_id
         self._tx_id   = tx_id
         self._timeout = timeout
         self._queue:  Optional[queue.Queue] = None
+        self._opened  = False
 
-    def open(self):
+    def open(self) -> "BLEBridgeConnection":
         if not self._bridge.is_connected:
             raise ConnectionError("BLE bridge not connected — call bridge.connect() first")
         self._queue = self._bridge.register_channel(self._tx_id, self._rx_id)
+        self._opened = True
+        return self
 
-    def close(self):
+    def close(self) -> None:
         if self._queue is not None:
             self._bridge.unregister_channel(self._tx_id, self._rx_id)
             self._queue = None
+        self._opened = False
 
-    def send(self, payload: bytes):
+    def is_open(self) -> bool:
+        return self._opened
+
+    def specific_send(self, payload: bytes, timeout: Optional[float] = None) -> None:
+        # timeout is unused: BLEBridge.send_frame blocks on the async loop result.
         self._bridge.send_frame(self._tx_id, self._rx_id, payload)
 
-    def wait_frame(self, timeout: Optional[float] = None) -> bytes:
+    def specific_wait_frame(self, timeout: Optional[float] = None) -> Optional[bytes]:
         t = timeout if timeout is not None else self._timeout
         if self._queue is None:
             raise ConnectionError("Connection not open")
         try:
             frame = self._queue.get(timeout=t)
         except queue.Empty:
-            raise TimeoutError(
+            raise TimeoutException(
                 f"No BLE response within {t}s "
                 f"(tx={self._tx_id:#06x} rx={self._rx_id:#06x})")
         if frame is None:
             raise ConnectionError("BLE bridge disconnected mid-operation")
         return frame
 
+    def empty_rxqueue(self) -> None:
+        if self._queue is not None:
+            while not self._queue.empty():
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+
+    # ── Backward-compat shims (pre-BaseConnection public surface) ─────────
+    # No in-tree caller uses these; kept so any out-of-tree/notebook code that
+    # treated this object as a raw bridge channel keeps working. NOTE: do NOT
+    # redefine send()/wait_frame() here — those are the BaseConnection methods
+    # udsoncan.Client relies on (Request/Response payload extraction + the
+    # exception= contract); overriding them would break the client.
     def empty(self) -> bool:
+        """Legacy: True if the rx queue is empty (does not drain)."""
         return self._queue is None or self._queue.empty()
 
     def __enter__(self):

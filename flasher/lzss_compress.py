@@ -131,8 +131,12 @@ def lzss_decompress(data: bytes) -> bytes:
                 token  = (hi << 8) | lo
                 offset = (token >> 6) & 0x3FF
                 length = (token & 0x3F) + 3
-                for i in range(length):
-                    b = window[(offset + i) % WINDOW_SIZE]
+                # Dipperstein reads the whole match from the PRE-copy window, then
+                # slides it in — so overlapping / run-length references decode the
+                # same bytes the encoder matched against, not bytes written mid-copy.
+                # Interleaving read+write here desyncs the window on overlaps.
+                matched = bytes(window[(offset + i) % WINDOW_SIZE] for i in range(length))
+                for b in matched:
                     output.append(b)
                     window[win_pos] = b
                     win_pos = (win_pos + 1) % WINDOW_SIZE

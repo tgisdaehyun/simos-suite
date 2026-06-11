@@ -208,6 +208,10 @@ def run_all(repo: pathlib.Path):
     _test_xor_roundtrip()
     _test_xor_known_vector()
 
+    print("\n  ── LZSS ─────────────────────────────────────────────────────────")
+    _test_lzss_roundtrip()
+    _test_lzss_runlength()
+
     print("\n  ── Workshop code ────────────────────────────────────────────────")
     _test_workshop_code_length()
     _test_workshop_code_bcd()
@@ -387,6 +391,36 @@ def _test_xor_known_vector():
     _test("XOR encrypt — known vector (0x00 XOR i = i)",
           result == expected,
           f"got={result.hex()} expected={expected.hex()}")
+
+
+def _test_lzss_roundtrip():
+    """lzss_decompress(lzss_compress(x)) reproduces x across varied inputs,
+    including run-length / overlapping-match cases that desync a naive
+    interleaved-window decoder."""
+    from flasher.lzss_compress import lzss_compress, lzss_decompress
+    import random
+    cases = [
+        b"", b"A", b"AB" * 200, bytes(2000), b"\xAA" * 1000,
+        bytes(range(256)) * 8, b"ABCABCABC" * 300,
+        b"\x00" * 100 + b"\xFF" * 100 + b"\x00\xFF" * 500,   # heavy overlap
+    ]
+    rng = random.Random(1234)
+    cases.append(bytes(rng.randrange(256) for _ in range(4000)))
+    cases.append(bytes(rng.choice([0, 0, 0, 1, 255, 0xAA]) for _ in range(4000)))
+    bad = [i for i, x in enumerate(cases)
+           if lzss_decompress(lzss_compress(x))[:len(x)] != x]
+    _test("LZSS — round-trip (varied + overlap)",
+          not bad, f"{len(cases)} cases, failed idx={bad}")
+
+
+def _test_lzss_runlength():
+    """Regression: a run followed by alternating bytes forces overlapping
+    back-references; must round-trip exactly (corrupted before the Dipperstein
+    read-all-then-slide fix)."""
+    from flasher.lzss_compress import lzss_compress, lzss_decompress
+    x = bytes([0x00] * 64 + [0xAA] * 64) + b"\x11\x22" * 400
+    out = lzss_decompress(lzss_compress(x))[:len(x)]
+    _test("LZSS — run-length / overlap regression", out == x, f"in={len(x)}")
 
 
 # ── Workshop code tests ────────────────────────────────────────────────────────

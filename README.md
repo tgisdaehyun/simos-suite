@@ -19,10 +19,11 @@ expect rough edges, missing pieces, and features that are wired but unconfirmed.
 
 - **Read-only features** (ECU Info, Logger, Raw Sniff, Trans live data) are
   low-risk — worst case, they misread something.
-- **Write features** (Flash, Tune → save/checksums, CP Tools → IKA write /
-  constellation update) are **experimental and not fully validated on
-  hardware.** The CP routine (`0x0226`) is wired but unconfirmed. Check the
-  feature table below before trusting any of them.
+- **Write features** (Flash, CP Tools → IKA write / constellation update) are
+  **experimental and not fully validated on hardware.** The flash write path is
+  implemented but **disabled in the GUI** pending hardware validation, and the
+  CP routine (`0x0226`) is wired but unconfirmed. Check the feature table below
+  before trusting any of them.
 
 **Flashing an ECU/TCU can brick it.** Do not use the flash/write features on a
 vehicle you can't afford to recover — have a bench setup (boot-mode / BDM) or a
@@ -70,11 +71,11 @@ is not for you — though the license doesn't stop you. The copyleft does.
 |-----|-------------|
 | **Connect** | Auto-detects BLE bridge (UUID 0xABF0), USB bridge (CP210x/CH340 VID:PID), J2534 DLL (registry scan), SocketCAN. Manual COM/path override. ECU selector for S85/SC1/SC2/SC8. |
 | **ECU Info** | Reads 18 standard VW DIDs — VIN, part numbers, FAZIT, mileage, session state, ASAM file ID. |
-| **Flash** | Full UDS CAL block flash: extended session → SA2 → erase (0xFF00) → RequestDownload → TransferData → exit → verify (0xFF01). Read CAL from ECU via ReadMemoryByAddress and auto-load into Tune tab. |
-| **Tune** | Simos8.5 calibration editor — all 14 tables with real RPM/load axis labels. Heat-map coloring. Editable cells, color updates live. 2D chart for 1×N tables (MAF, throttle, limits). Lean diagnosis. Fix checksums + save. |
+| **Flash** | Read CAL from ECU (ReadMemoryByAddress) + verify checksum work today. The UDS write/flash sequence is implemented — extended session → SA2 → erase (0xFF00) → RequestDownload → TransferData → exit → verify (0x0202), with CheckProgrammingDependencies (0xFF01) as a separate step — but the write button is **disabled in the GUI** pending hardware validation (see ⚠️ status above). |
 | **Logger** | Live DID poller using `logger.LogSession` — 16 channels, configurable interval, CSV export. |
 | **CP Tools** | Full CP module scan — reads IKA key (DID 0x00BE) from all enrolled modules in one pass. J533 constellation probe, ODX parser. IKA key write + constellation update. CP routine ID 0x0226 wired in (pending hardware confirmation). |
 | **Raw Sniff** | Passive CAN bus listener via J2534 raw CAN channel. Use with OBD splitter alongside VCDS/ODIS to capture full UDS exchanges. ISO-TP reassembly, UDS service decode, PCAP export for Wireshark. |
+| **Diagnostics** | Bus scan — probes all known VAG module addresses and shows what's present. Reads stored/pending DTCs from all present modules (UDS 0x19) and clears DTCs from selected modules (UDS 0x14). |
 | **Trans** | ZF 8HP / DL501 / DQ250 / DQ381 live data — gear, selector, ATF temp, shaft speeds, torque, pressures. |
 
 ---
@@ -200,6 +201,7 @@ python -m cp_tools.mwb_extract --confirm 0x0226
 - [x] Phase 3 — CP routine ID extracted (`0x0226`), logger wired, EXE build, passive CAN sniffer
 - [ ] Phase 4 — CP hardware confirmation + full auth sequence
 - [ ] Phase 5 — Android APK (Kotlin BLE client)
+- [ ] Tune tab — Simos8.5 calibration editor (14 tables, RPM/load axes, heat-map, 2D chart for 1×N tables, lean diagnosis, checksum fix + save) — *not yet shipped*
 
 ---
 

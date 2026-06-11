@@ -236,6 +236,21 @@ def validate_ecm3(cal_data: bytes, asw1_data: bytes = None,
     return (stored == checksum, stored, checksum)
 
 
+def ecm3_computable(cal_data: bytes, asw1_data: bytes = None) -> bool:
+    """
+    True if the ECM3 checksum can actually be recomputed from the data on hand:
+    either ASW1 is supplied (modern ECUs keep the ECM3 area addresses there), or
+    the addresses are embedded in CAL (very old ECUs). If neither, ECM3 cannot be
+    recomputed and must be left as-is — never overwritten with a placeholder value.
+    """
+    hoff = ECM3_CAL_CHECKSUM_OFFSET
+    if asw1_data is not None:
+        return True
+    if len(cal_data) < hoff + 28:
+        return False
+    return struct.unpack_from("<I", cal_data, hoff + 24)[0] > 0
+
+
 def fix_ecm3(cal_data: bytes, asw1_data: bytes = None,
              asw1_offset: int = None) -> bytes:
     """
@@ -243,8 +258,17 @@ def fix_ecm3(cal_data: bytes, asw1_data: bytes = None,
 
     asw1_offset: override ECM3 ASW1 variant (0x520=late, 0x540=early).
     If omitted, auto-detected from asw1_data content.
+
+    If the checksum cannot be recomputed (no ASW1 and no CAL-embedded addresses),
+    the CAL is returned UNCHANGED with a warning — we never write a placeholder
+    value, which would corrupt an otherwise-valid CAL.
     """
     hoff = ECM3_CAL_CHECKSUM_OFFSET
+    if not ecm3_computable(cal_data, asw1_data):
+        log.warning("ECM3: cannot recompute (no ASW1, no embedded addresses) — "
+                    "leaving the existing ECM3 unchanged. A *modified* CAL flashed "
+                    "this way may be rejected by the ECU's runtime ECM3 monitor.")
+        return cal_data
     valid, stored, calculated = validate_ecm3(cal_data, asw1_data, asw1_offset)
 
     if valid:

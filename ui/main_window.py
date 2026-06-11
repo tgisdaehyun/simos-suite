@@ -1057,21 +1057,16 @@ class LoggerTab(_Tab):
         gauges = _card(self, padx=12, pady=10)
         gauges.pack(fill="x", padx=14, pady=4)
 
-        # 3-column gauge grid
-        grid = _frame(gauges, bg=C["surface"])
-        grid.pack(fill="x")
+        # 3-column gauge grid — kept as an attr so the gauges can be rebuilt
+        # when the preset changes (see _build_gauges / _on_preset_change).
+        self._gauge_grid = _frame(gauges, bg=C["surface"])
+        self._gauge_grid.pack(fill="x")
 
-        for i, (did, name) in enumerate(self.DIDS):
-            col_frame = _frame(grid, bg=C["surface"])
-            col_frame.grid(row=i // 3, column=i % 3, padx=6, pady=4,
-                           sticky="w")
-            tk.Label(col_frame, text=f"{name:<14}", fg=C["muted"],
-                     bg=C["surface"], font=("Menlo", 9)).pack(side="left")
-            var = tk.StringVar(value="—")
-            self._values[did] = var
-            tk.Label(col_frame, textvariable=var, fg=C["blue"],
-                     bg=C["surface"], font=("Menlo", 10, "bold"),
-                     width=10, anchor="e").pack(side="left")
+        # Build the initial gauges from the default preset's channel set so the
+        # visible gauges, self._values and self._active_channels stay in sync.
+        self._active_channels = self._resolve_preset_channels(
+            self._preset_default())
+        self._build_gauges(self._active_channels)
 
         _section(self, "poll settings")
 
@@ -1128,9 +1123,19 @@ class LoggerTab(_Tab):
         for v in self._values.values():
             v.set("—")
 
-    def _on_preset_change(self, *_):
-        """Rebuild gauge grid when preset changes."""
-        preset = self._preset_var.get()
+    @staticmethod
+    def _preset_default() -> str:
+        """Default preset name (matches the combobox initial value)."""
+        return "essential"
+
+    def _resolve_preset_channels(self, preset: str) -> List["Channel"]:
+        """
+        Resolve a preset name to its list of Channel objects.
+
+        Tries the per-preset channel tables in logger.channels_s85; if that
+        module isn't present, falls back to the full SIMOS85_CHANNELS set so
+        the logger still has channels to poll/display.
+        """
         try:
             from logger.channels_s85 import (
                 CHANNELS_ESSENTIAL, CHANNELS_FUEL, CHANNELS_BOOST,
@@ -1144,13 +1149,48 @@ class LoggerTab(_Tab):
                 "lean diag": CHANNELS_LEAN_DIAG,
                 "full":      CHANNELS_FULL,
             }
-            self._active_channels = _map.get(preset, CHANNELS_ESSENTIAL)
+            channels = _map.get(preset, CHANNELS_ESSENTIAL)
+            if channels:
+                return list(channels)
         except ImportError:
-            from logger import SIMOS85_CHANNELS
-            self._active_channels = SIMOS85_CHANNELS
-        # Reset gauge vars for new channel set
-        self._values = {ch.did: tk.StringVar(value="—")
-                        for ch in self._active_channels}
+            pass
+        from logger import SIMOS85_CHANNELS
+        return list(SIMOS85_CHANNELS)
+
+    def _build_gauges(self, channels: List["Channel"]):
+        """
+        (Re)build the live-gauge grid for the given channel set.
+
+        Tears down any existing gauge widgets and recreates one gauge per
+        channel, each bound to a fresh StringVar in self._values, so the
+        on-screen gauges always track the current preset's channels. The
+        poll loop updates self._values[ch.did], which these labels display.
+        """
+        # Destroy the previous preset's gauge widgets.
+        for child in self._gauge_grid.winfo_children():
+            child.destroy()
+
+        # Fresh StringVars for the new channel set.
+        self._values = {}
+        for i, ch in enumerate(channels):
+            col_frame = _frame(self._gauge_grid, bg=C["surface"])
+            col_frame.grid(row=i // 3, column=i % 3, padx=6, pady=4,
+                           sticky="w")
+            tk.Label(col_frame, text=f"{ch.name:<14}", fg=C["muted"],
+                     bg=C["surface"], font=("Menlo", 9)).pack(side="left")
+            var = tk.StringVar(value="—")
+            self._values[ch.did] = var
+            tk.Label(col_frame, textvariable=var, fg=C["blue"],
+                     bg=C["surface"], font=("Menlo", 10, "bold"),
+                     width=10, anchor="e").pack(side="left")
+
+    def _on_preset_change(self, *_):
+        """Rebuild gauge grid when preset changes."""
+        preset = self._preset_var.get()
+        self._active_channels = self._resolve_preset_channels(preset)
+        # Rebuild the visible gauges so they track the new channel set
+        # (and so the gauge count matches this preset).
+        self._build_gauges(self._active_channels)
 
     def _toggle_log(self):
         if self._running:

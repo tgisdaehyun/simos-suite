@@ -6,7 +6,7 @@ Handles the full UDS programming sequence:
   2. SA2 seed/key security access (using sa2_seed_key bytecode interpreter)
   3. Block erase (RoutineControl 0xFF00)
   4. RequestDownload + TransferData + RequestTransferExit
-  5. Checksum verification routine (0xFF01)
+  5. Checksum verification routine (0x0202; CheckProgrammingDependencies 0xFF01 runs separately)
 
 Supports Simos8.5 (XOR crypto) and Simos12/18 (AES) through the ECUDef abstraction.
 Interface: J2534 (BridgeLEG ESP32) or SocketCAN.
@@ -51,13 +51,15 @@ def _noop(p: FlashProgress):
 # ─── Connection setup ─────────────────────────────────────────────────────────
 
 def _make_connection(ecu: ECUDef, interface: str, interface_path: Optional[str] = None,
-                     st_min_us: int = 350_000, ble_bridge=None):
+                     st_min_us: int = 350_000, ble_bridge=None, ws_bridge=None):
     """
     Create a udsoncan connection for the given interface.
 
     interface options:
         "BLE"            — ESP32 BLE bridge (pass ble_bridge= a connected BLEBridge instance)
+        "WIFI"           — ESP32 FunkBridge WiFi bridge (pass ws_bridge= a connected WSBridge)
         "J2534"          — J2534 DLL (Tactrix, VNCI, etc.)
+        "USBISOTP_COM3"  — ESP32 ISO-TP bridge over USB serial
         "SocketCAN_can0" — Linux SocketCAN (replace can0 with your interface name)
     """
     params = {"tx_padding": 0x55}
@@ -169,10 +171,25 @@ def _make_connection(ecu: ECUDef, interface: str, interface_path: Optional[str] 
             tx_stmin       = max(1, st_min_us // 1000),   # convert µs → ms
         )
 
+    elif interface.upper().startswith("WIFI") or interface.upper() in ("WS", "FUNKBRIDGE"):
+        # ESP32 "FunkBridge" WiFi ISO-TP bridge — same 0xF1 framing as BLE/USB,
+        # carried over a WebSocket. Pass ws_bridge= a connected WSBridge; the
+        # caller owns its lifecycle (same pattern as BLE).
+        if ws_bridge is None:
+            raise ValueError(
+                "interface='WIFI' requires ws_bridge= a connected transport.ws_bridge.WSBridge.\n"
+                "    from transport.ws_bridge import WSBridge\n"
+                "    b = WSBridge('ws://funkbridge.local/ws'); b.connect()\n"
+                "    conn = _make_connection(ecu, 'WIFI', ws_bridge=b)"
+            )
+        from transport.ws_bridge import WSBridgeConnection
+        return WSBridgeConnection(ws_bridge, rx_id=ecu.can_rx, tx_id=ecu.can_tx,
+                                  timeout=5.0)
+
     else:
         raise ValueError(
             f"Unknown interface: '{interface}'. "
-            f"Use 'BLE', 'USBISOTP_COM3', 'J2534', or 'SocketCAN_can0'."
+            f"Use 'BLE', 'WIFI', 'USBISOTP_COM3', 'J2534', or 'SocketCAN_can0'."
         )
 
 
@@ -400,7 +417,7 @@ def flash_cal(
             ecu        = ecu,
             block_num  = cal_block.number,
             raw_bytes  = cal_bytes,
-            asw1_bytes = None,   # CAL-only flash — no ASW1 available for ECM3
+            asw1_bytes = None,   # CAL-only: no ASW1 -> ECM3 left unchanged + user warned (no corruption)
             dry_run    = dry_run,
             callback   = callback,
         )
@@ -456,7 +473,7 @@ def _flash_one_block(
     Session must already be open and SA2 unlocked before calling.
     Returns True on success.
     """
-    from flasher.checksum_simos import fix_crc32, fix_ecm3, xor_encrypt
+    from flasher.checksum_simos import fix_crc32, fix_ecm3, xor_encrypt, ecm3_computable
     from flasher.lzss_compress  import lzss_compress
 
     blk = ecu.blocks[block_num]
@@ -470,6 +487,11 @@ def _flash_one_block(
     data = raw_bytes
 
     if ecu.crypto == CryptoType.XOR_COUNTER and block_num == blk.number and blk.cal_block:
+        if not ecm3_computable(data, asw1_bytes):
+            callback(FlashProgress("VERIFY",
+                "WARNING: ECM3 not recomputed (no ASW1). A *modified* CAL may be rejected "
+                "by the ECU at runtime — use a full block flash with ASW1 to fix ECM3.",
+                4, label))
         try:
             data = fix_ecm3(data, asw1_bytes)
         except Exception as e:
@@ -583,227 +605,6 @@ def _flash_one_block(
     callback(FlashProgress("TRANSFER", f"{label} done", 100, label))
     log.info("Block %d (%s) flashed OK — %d bytes", block_num, label, total)
     return True
-
-
-# ─── Multi-block flash entry point ───────────────────────────────────────────
-
-def flash_blocks(
-    ecu:            "ECUDef",
-    blocks:         "Dict[int, bytes]",
-    interface:      str = "J2534",
-    interface_path: "Optional[str]" = None,
-    callback:       "ProgressCallback" = _noop,
-    dry_run:        bool = False,
-) -> bool:
-    """
-    Flash one or more blocks to the ECU.
-
-    Args:
-        ecu:            ECUDef (use SIMOS85 for the 3.0T)
-        blocks:         Dict of {block_number: raw_bytes}, e.g.:
-                            {2: asw1_bytes, 3: cal_bytes}
-                        Block numbers for Simos8.5:
-                            1 = CBOOT  (use with extreme caution)
-                            2 = ASW1   (application software)
-                            3 = CAL    (calibration — normal tune target)
-                        Non-flashable blocks (6 = CBOOT_TEMP) are silently skipped.
-        interface:      "J2534", "SocketCAN_can0", "BLE", "USBISOTP_COM3"
-        interface_path: DLL path or port
-        callback:       Progress callback
-        dry_run:        If True, go through all motions but don't write to ECU
-
-    Returns:
-        True if all blocks flashed successfully.
-
-    Block order:
-        Blocks are always flashed in ascending block number order regardless of
-        dict insertion order, matching VW_Flash behaviour. For a full reflash
-        this means CBOOT → ASW1 → CAL. For a tune-only flash, just pass {3: cal}.
-
-    Safety:
-        - CBOOT (block 1) requires the same SA2 unlock as other blocks but is
-          far more dangerous to flash incorrectly. The function will flash it if
-          you pass it, but consider using flash_cal() for CAL-only operations.
-        - If any block fails, flashing stops immediately. Partial flashes leave
-          the ECU in an indeterminate state — always have a recovery plan (bench
-          setup or Tactrix cable + VW_Flash).
-    """
-    if not blocks:
-        log.warning("flash_blocks: no blocks provided")
-        return False
-
-    # Validate all block numbers before connecting
-    for bnum in blocks:
-        if bnum not in ecu.blocks:
-            callback(FlashProgress("ERROR",
-                                   f"Block {bnum} not defined for {ecu.name}", 0))
-            return False
-        blk = ecu.blocks[bnum]
-        if not blk.flashable:
-            log.info("Block %d (%s) is non-flashable — will be skipped", bnum, blk.name)
-
-    # Pull ASW1 bytes from the block dict if provided — needed for ECM3 fix on CAL
-    asw1_bytes = blocks.get(2, None)
-
-    def _obd_clear(iface, ipath):
-        try:
-            if iface.upper() == "J2534":
-                from lib.connections.j2534_connection import J2534Connection
-                dll = ipath or (
-                    "C:/Program Files (x86)/OpenECU/OpenPort 2.0/drivers/openport 2.0/op20pt32.dll"
-                )
-                c = J2534Connection(windll=dll, rxid=0x7E8, txid=0x700)
-            elif iface.upper().startswith("SOCKETCAN"):
-                from udsoncan.connections import IsoTPSocketConnection
-                iface_name = ipath or iface.split("_", 1)[-1]
-                c = IsoTPSocketConnection(iface_name, rxid=0x7E8, txid=0x700,
-                                          params={"tx_padding": 0x55})
-            else:
-                return
-            c.open()
-            c.specific_send(bytes([0x04]))
-            try: c.specific_wait_frame(timeout=1.0)
-            except Exception: pass
-            try: c.specific_wait_frame(timeout=0.5)
-            except Exception: pass
-            c.close()
-        except Exception as e:
-            log.debug("OBD DTC clear: %s", e)
-
-    callback(FlashProgress("CONNECT", f"Connecting to {ecu.name}…", 0))
-    _obd_clear(interface, interface_path)
-
-    conn = _make_connection(ecu, interface, interface_path)
-
-    # STMIN_TX gate — same check as flash_cal
-    if hasattr(conn, 'stmin_tx_supported') and not conn.stmin_tx_supported:
-        callback(FlashProgress(
-            "ERROR",
-            "J2534 adapter does not support STMIN_TX — flash will fail mid-block. "
-            "Use Tactrix OpenPort 2.0 or Switchleg ESP32 (BridgeLEG firmware).",
-            0,
-        ))
-        return False
-
-    cfg = dict(configs.default_client_config)
-    cfg["security_algo"]        = _make_security_algo(ecu.sa2_script)
-    cfg["security_algo_params"] = None
-    cfg["data_identifiers"]     = {}
-    cfg["request_timeout"]      = 30
-
-    block_order = sorted(b for b in blocks if ecu.blocks[b].flashable)
-    total_blocks = len(block_order)
-
-    with Client(conn, request_timeout=30, config=cfg) as client:
-
-        def _st(t=30):
-            try: client.session_timing["p2_server_max"] = t
-            except TypeError: client.session_timing.p2_server_max = t
-            client.config["request_timeout"] = t
-
-        # ── 1. Extended session ────────────────────────────────────────────
-        callback(FlashProgress("CONNECT", "Opening extended session…", 5))
-        try:
-            client.change_session(
-                services.DiagnosticSessionControl.Session.extendedDiagnosticSession)
-        except exceptions.NegativeResponseException as e:
-            callback(FlashProgress("ERROR", f"Extended session refused: {e}", 0))
-            return False
-        _st(30)
-
-        # Read VIN for logging
-        vin = "UNKNOWN"
-        try:
-            class _SC(udsoncan.DidCodec):
-                def encode(self, v): return bytes(v)
-                def decode(self, p): return p.decode("ascii", errors="replace")
-                def __len__(self): raise udsoncan.DidCodec.ReadAllRemainingData
-            client.config["data_identifiers"][0xF190] = _SC
-            vin = client.read_data_by_identifier_first(0xF190)
-        except Exception: pass
-        callback(FlashProgress("CONNECT", f"VIN: {vin}", 8))
-        log.info("flash_blocks: VIN=%s blocks=%s", vin, block_order)
-
-        # ── 2. Programming precondition 0x0203 ────────────────────────────
-        try:
-            client.start_routine(0x0203)
-        except Exception as e:
-            log.warning("Precondition 0x0203: %s (continuing)", e)
-        client.tester_present()
-
-        # ── 3. Programming session ─────────────────────────────────────────
-        callback(FlashProgress("CONNECT", "Entering programming session…", 12))
-        try:
-            client.change_session(
-                services.DiagnosticSessionControl.Session.programmingSession)
-        except exceptions.NegativeResponseException as e:
-            callback(FlashProgress("ERROR", f"Programming session refused: {e}", 0))
-            return False
-        _st(30)
-        client.tester_present()
-
-        # ── 4. SA2 security access level 17 ───────────────────────────────
-        callback(FlashProgress("CONNECT", "SA2 security access…", 18))
-        try:
-            client.unlock_security_access(0x11)
-        except exceptions.NegativeResponseException as e:
-            callback(FlashProgress("ERROR", f"SA2 denied: {e}", 0))
-            return False
-        client.tester_present()
-
-        # ── 5. Workshop code 0xF15A ────────────────────────────────────────
-        try:
-            from flasher.workshop_code import build_workshop_code
-            cal_bytes_for_wc = blocks.get(3) or next(iter(blocks.values()))
-            wc = build_workshop_code(cal_data=cal_bytes_for_wc)
-            client.write_data_by_identifier(0xF15A, wc)
-        except Exception as e:
-            log.debug("Workshop code: %s", e)
-        client.tester_present()
-
-        # ── 6. Flash each block in order ───────────────────────────────────
-        for i, bnum in enumerate(block_order):
-            blk_label = ecu.blocks[bnum].name
-            overall_pct = 20 + int(75 * i / total_blocks)
-            callback(FlashProgress("FLASHING",
-                                   f"Block {i+1}/{total_blocks}: {blk_label}",
-                                   overall_pct, blk_label))
-
-            ok = _flash_one_block(
-                client    = client,
-                ecu       = ecu,
-                block_num = bnum,
-                raw_bytes = blocks[bnum],
-                asw1_bytes= asw1_bytes,
-                dry_run   = dry_run,
-                callback  = callback,
-            )
-            if not ok:
-                return False
-
-            client.tester_present()
-
-        # ── 7. Verify programming dependencies ────────────────────────────
-        callback(FlashProgress("VERIFY", "Verifying programming dependencies…", 96))
-        try:
-            client.start_routine(udsoncan.Routine.CheckProgrammingDependencies)
-        except Exception as e:
-            log.warning("CheckProgrammingDependencies: %s", e)
-        client.tester_present()
-
-        # ── 8. ECU hard reset ──────────────────────────────────────────────
-        callback(FlashProgress("DONE", "Resetting ECU…", 99))
-        try:
-            client.ecu_reset(services.ECUReset.ResetType.hardReset)
-        except Exception as e:
-            log.debug("ECU reset: %s", e)
-
-        callback(FlashProgress("DONE", f"All blocks flashed — {vin}", 100))
-        log.info("flash_blocks complete — VIN=%s blocks=%s", vin, block_order)
-        _obd_clear(interface, interface_path)
-        return True
-
-
 
 
 # ─── Multi-block flash ────────────────────────────────────────────────────────

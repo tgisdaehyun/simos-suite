@@ -1128,7 +1128,7 @@ class J533Probe:
             self.connect()
 
         try:
-            conn = self._client_j533._connection
+            conn = self._client_j533.conn
             request_bytes = bytes([0x31, 0x01, rid_hi, rid_lo]) + payload
             conn.specific_send(request_bytes)
             # Loop to handle NRC 0x78 (requestCorrectlyReceived-ResponsePending)
@@ -1156,8 +1156,8 @@ class J533Probe:
                 import udsoncan.services as _svc
                 self._client_j533.config["request_timeout"] = 10
                 resp = self._client_j533.routine_control(
-                    request_type=_svc.RoutineControl.RequestType.startRoutine,
-                    routine_id=routine_id,
+                    routine_id,
+                    _svc.RoutineControl.ControlType.startRoutine,
                     data=payload if payload else None,
                 )
                 raw = bytes([0x71, 0x01, rid_hi, rid_lo])
@@ -1176,7 +1176,7 @@ class J533Probe:
         if self._client_j533 is None:
             self.connect()
         try:
-            conn = self._client_j533._connection
+            conn = self._client_j533.conn
             conn.specific_send(bytes([0x31, 0x03, rid_hi, rid_lo]))
             # Handle NRC 0x78 pending responses
             deadline = time.time() + 10.0
