@@ -42,27 +42,40 @@ class ModuleEntry:
     cp_slave:  bool = False   # participates in Component Protection
     have_patch: bool = False  # we hold a validated CP-bypass patch
     note:      str = ""
+    db_part:   Optional[str] = None  # c7_module_db.json part number, if mapped
 
     @property
     def resp(self) -> int:
         return response_id(self.req)
 
+    def db(self) -> Optional[dict]:
+        """The c7_module_db.json firmware record for this module, or None.
+        Gives arch / data-format / signed(rsa|crc) / SA2 / flash_profile."""
+        if not self.db_part:
+            return None
+        from core.module_db import get_module
+        return get_module(self.db_part)
+
 
 # Confident set. ecu_key links into core.ecu_defs.ECU_REGISTRY.
 MODULE_MAP: List[ModuleEntry] = [
-    ModuleEntry("01", "J623 Engine (Simos8.5)",      0x7E0, "DRIVE", "S85",        note="3.0T TFSI"),
+    ModuleEntry("01", "J623 Engine (Simos8.5)",      0x7E0, "DRIVE", "S85",        note="3.0T TFSI",
+                db_part="4G0907551"),
     ModuleEntry("02", "J217 Transmission (ZF8HP)",   0x7E1, "DRIVE", None,         cp_slave=False,
-                note="TCU — verify coupling before assuming CP vs immobilizer"),
-    ModuleEntry("03", "J104 ABS",                    0x713, "DRIVE", None),
-    ModuleEntry("15", "J234 Airbag",                 0x715, "DRIVE", None,         cp_slave=True),
-    ModuleEntry("17", "J285 Instrument Cluster",     0x714, "DRIVE", None,         cp_slave=True),
+                note="TCU — verify coupling before assuming CP vs immobilizer", db_part="4G0927153"),
+    ModuleEntry("03", "J104 ABS/ESP",                0x713, "DRIVE", None,         db_part="4G0907379"),
+    ModuleEntry("15", "J234 Airbag",                 0x715, "DRIVE", None,         cp_slave=True,
+                db_part="4G0959655"),
+    ModuleEntry("17", "J285 Instrument Cluster",     0x714, "DRIVE", None,         cp_slave=True,
+                db_part="4G0919158"),
     ModuleEntry("19", "J533 Gateway (Lear)",         0x710, "DRIVE", "GATEW_LEAR", cp_slave=True,
-                note="CP router; stock reflash supported"),
+                note="CP router; stock reflash supported (flashware 4H0907468)"),
     ModuleEntry("05", "J518 KESSY",                  0x732, "CONV",  None,         cp_slave=True,
                 note="immobilizer-adjacent — do not patch CP here"),
     ModuleEntry("08", "J255 Climatronic HVAC",       0x746, "CONV",  "J255_LOW",   cp_slave=True,
-                have_patch=True, note="CP-bypass patch validated (FL_4G0820043HI_0113)"),
-    ModuleEntry("09", "J519 Body Electronics",       0x70E, "CONV",  None,         cp_slave=True),
+                have_patch=True, note="CP-bypass patched (HI 4-zone + LO 2-zone)", db_part="4G0820043"),
+    ModuleEntry("09", "J519 Body Electronics (BCM)", 0x70E, "CONV",  None,         cp_slave=True,
+                db_part="4G0907107"),
     ModuleEntry("46", "J393 Central Convenience",    0x70D, "CONV",  None,         cp_slave=True),
     ModuleEntry("36", "J136 Memory Seat Driver",     0x74C, "CONV",  None,         cp_slave=True,
                 note="next CP-patch target (task B)"),
