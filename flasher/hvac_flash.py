@@ -80,6 +80,7 @@ class PatchSite:
     new:    bytes
 
 
+# 4-zone (HIGH) — FL_4G0820043HI_0113, block1 = 1,003,520 B
 HVAC_HI0113_PATCH: List[PatchSite] = [
     PatchSite("cand1 getter FUN_00079580 -> return 0x0C",
               0x69580, bytes.fromhex("80072100"), bytes.fromhex("0c527f00")),
@@ -87,21 +88,59 @@ HVAC_HI0113_PATCH: List[PatchSite] = [
               0x6957a, bytes.fromhex("e34f1453"), bytes.fromhex("01520000")),
 ]
 
+# 2-zone (LOW) — FL_4G0820043LO_0113, block1 = 741,376 B. Structural twin of HI;
+# both patch sites use the entry-force form (overwrite the first instruction with
+# "mov <val>,r10 ; jmp [lp]"), which returns immediately regardless of the prologue.
+HVAC_LO0113_PATCH: List[PatchSite] = [
+    PatchSite("cand1 getter FUN_00069d16 -> return 0x0C",
+              0x59d16, bytes.fromhex("80072100"), bytes.fromhex("0c527f00")),
+    PatchSite("cand3 enum FUN_00069d08 -> StateOfAuthe Valid",
+              0x59d08, bytes.fromhex("04478e83"), bytes.fromhex("01527f00")),
+]
+
+# Known patch sets, tried in order. Auto-selected by which set's original bytes
+# all match the loaded image (HI sites land in a 2-zone image but won't match, and
+# vice-versa), so the right patch is chosen for whichever variant is loaded.
+PATCH_SETS = [
+    ("HI_0113 (4-zone)", HVAC_HI0113_PATCH),
+    ("LO_0113 (2-zone)", HVAC_LO0113_PATCH),
+]
+
 
 class FirmwareMismatch(Exception):
-    """The unit's firmware does not match the validated RE target — refuse to patch."""
+    """The unit's firmware does not match any validated RE target — refuse to patch."""
+
+
+def select_patch_set(block1: bytes):
+    """Return (name, sites) of the patch set whose original bytes all match this
+    image, or (None, None) if none does (unknown firmware → must be re-analysed)."""
+    for name, sites in PATCH_SETS:
+        if all(s.offset + len(s.orig) <= len(block1)
+               and bytes(block1[s.offset:s.offset + len(s.orig)]) == s.orig
+               for s in sites):
+            return name, sites
+    return None, None
 
 
 def patch_block1(block1: bytes,
-                 sites: List[PatchSite] = HVAC_HI0113_PATCH,
+                 sites: Optional[List[PatchSite]] = None,
                  recompute_crc: bool = True) -> bytes:
     """
     Apply the CP-bypass patch to a block-1 image and fix the boot CRC.
 
-    Raises FirmwareMismatch if any validated original byte sequence is absent —
-    meaning this is NOT the RE'd FL_4G0820043HI_0113 firmware and must be
-    re-analysed before patching (we never pattern-guess a crypto-gate patch).
+    With sites=None (default) the correct patch set (4-zone HI / 2-zone LO) is
+    auto-selected by matching original bytes. Raises FirmwareMismatch if the image
+    matches no known target — meaning it must be re-analysed before patching (we
+    never pattern-guess a crypto-gate patch).
     """
+    if sites is None:
+        name, sites = select_patch_set(block1)
+        if sites is None:
+            raise FirmwareMismatch(
+                f"image ({len(block1)} B) matches no known patch set "
+                f"(not FL_4G0820043HI_0113 4-zone nor LO_0113 2-zone). Read it back "
+                f"and re-locate the getter with the V850 static analysis before flashing.")
+        log.info("auto-selected patch set: %s", name)
     data = bytearray(block1)
     for s in sites:
         cur = bytes(data[s.offset:s.offset + len(s.orig)])
