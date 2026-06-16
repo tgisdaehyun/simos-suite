@@ -88,14 +88,42 @@ HVAC_HI0113_PATCH: List[PatchSite] = [
               0x6957a, bytes.fromhex("e34f1453"), bytes.fromhex("01520000")),
 ]
 
-# 2-zone (LOW) — FL_4G0820043LO_0113, block1 = 741,376 B. Structural twin of HI;
-# both patch sites use the entry-force form (overwrite the first instruction with
-# "mov <val>,r10 ; jmp [lp]"), which returns immediately regardless of the prologue.
+# 2-zone (LOW) — FL_4G0820043LO_0113, block1 = 741,376 B.
+# CORRECTED 2026-06-16 (adversarial verify wmd8amokk + producer derivation wx44j6x3o).
+# The earlier 2-site (cand1 + cand3) patch was WRONG and is replaced:
+#   * cand3 (FUN_00069d08 -> 1) was COUNTERPRODUCTIVE — FUN_00069d08 returns {0,3} (a
+#     pending-request latch over gp-0x7c72, NOT a StateOfAuthe enum; the HI 0..3 enum does
+#     not exist in LO). Its only consumer, the auth state machine FUN_0006dd54, needs ==3
+#     to set the valid flag -0x7c17=1; forcing it to 1 JAMMED -0x7c17 at 0 forever.
+#   * The 2-site patch also missed the direct -0x7c17 readers (flap solver FUN_00069362,
+#     actuator gate FUN_0006afb8, UDS FUN_0006f32a/FUN_000752f8) and boot-reset re-clear.
+# Correct fix = keep cand1 (getter -> 0x0C) + NOP the two BNE guards in FUN_0006dd54's
+# default case (phase!=2 and FUN_00069d08()!=3 early-outs) so the firmware's OWN auth-grant
+# (mov 1,r9; st.b r9,-0x7c17  /  mov 3,r8; st.b r8,-0x7c16) runs unconditionally. Then ALL
+# readers see authenticated and it re-establishes every power-on. Bench-confirm the brief
+# key-on limp transient before the state-walk reaches the grant (~20 heartbeats).
 HVAC_LO0113_PATCH: List[PatchSite] = [
     PatchSite("cand1 getter FUN_00069d16 -> return 0x0C",
               0x59d16, bytes.fromhex("80072100"), bytes.fromhex("0c527f00")),
-    PatchSite("cand3 enum FUN_00069d08 -> StateOfAuthe Valid",
-              0x59d08, bytes.fromhex("04478e83"), bytes.fromhex("01527f00")),
+    PatchSite("guard1 NOP: phase!=2 early-out in FUN_0006dd54 (force auth-grant)",
+              0x5e118, bytes.fromhex("da0d"), bytes.fromhex("0000")),
+    PatchSite("guard2 NOP: FUN_00069d08()!=3 early-out in FUN_0006dd54 (force auth-grant)",
+              0x5e120, bytes.fromhex("9a0d"), bytes.fromhex("0000")),
+]
+
+# OPTIONAL erase-gate-open patch (LO_0113) — OPT-IN for the bench/recovery workflow only.
+# Forces FUN_00061e04 @0x61e04 to always return 0 ('mov r29,r10' 0x501d -> 'mov r0,r10' 0x5000),
+# so the EraseMemory gate FUN_0005ce44 always takes its proceed path ({0,0x18}) regardless of
+# CP-record state. Lets a bench-flashed unit then accept FUTURE in-car UDS reflashes (no re-pull).
+# Derived + adversarially verified (workflow w1193w22j 2026-06-16). Polarity facts that this
+# corrects: the gate proceeds ONLY on FUN_00061e04 in {0,0x18} (NOT {3,8}); the limp blocks via
+# gp-0x6930=0 -> FUN_0005625a=8 -> gate 0x21/0x22. FUN_00056414 is a CP-RECORD integrity scanner,
+# NOT AES. The prior '0x22->0x21' idea was WRONG (0x21 is also non-proceed).
+# TRADE-OFF: removes the CP-record integrity interlock before erase (brick risk LOW; the actual
+# write is still gated elsewhere). No upside on a healthy unit — include only deliberately.
+HVAC_LO0113_ERASEGATE: List[PatchSite] = [
+    PatchSite("erase-gate: FUN_00061e04 always return 0 (open EraseMemory)",
+              0x51e44, bytes.fromhex("1d50"), bytes.fromhex("0050")),
 ]
 
 # Known patch sets, tried in order. Auto-selected by which set's original bytes
@@ -124,7 +152,8 @@ def select_patch_set(block1: bytes):
 
 def patch_block1(block1: bytes,
                  sites: Optional[List[PatchSite]] = None,
-                 recompute_crc: bool = True) -> bytes:
+                 recompute_crc: bool = True,
+                 extra_sites: Optional[List[PatchSite]] = None) -> bytes:
     """
     Apply the CP-bypass patch to a block-1 image and fix the boot CRC.
 
@@ -132,6 +161,12 @@ def patch_block1(block1: bytes,
     auto-selected by matching original bytes. Raises FirmwareMismatch if the image
     matches no known target — meaning it must be re-analysed before patching (we
     never pattern-guess a crypto-gate patch).
+
+    extra_sites (optional) are appended after the auto-selected set — used for the
+    opt-in HVAC_LO0113_ERASEGATE patch (open EraseMemory for future in-car reflash).
+    Each extra site's original bytes are verified like any other (FirmwareMismatch
+    if absent), so passing the wrong-variant erase-gate sites is rejected, not silently
+    mis-applied.
     """
     if sites is None:
         name, sites = select_patch_set(block1)
@@ -141,6 +176,9 @@ def patch_block1(block1: bytes,
                 f"(not FL_4G0820043HI_0113 4-zone nor LO_0113 2-zone). Read it back "
                 f"and re-locate the getter with the V850 static analysis before flashing.")
         log.info("auto-selected patch set: %s", name)
+    if extra_sites:
+        sites = list(sites) + list(extra_sites)
+        log.info("appended %d extra patch site(s)", len(extra_sites))
     data = bytearray(block1)
     for s in sites:
         cur = bytes(data[s.offset:s.offset + len(s.orig)])
