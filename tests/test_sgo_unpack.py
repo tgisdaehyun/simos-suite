@@ -45,6 +45,15 @@ class TestBCB(unittest.TestCase):
         self.assertEqual(_shortest_period(b"GEHEIMGEHEIM"), b"GEHEIM")
         self.assertEqual(_shortest_period(b"ABCD"), b"ABCD")
 
+    def test_shortest_period_byte_aligned(self):
+        # regression: byte keys whose hex repeat-search could land on an odd
+        # index used to crash unhexlify. Period must be byte-aligned + correct.
+        for key in (b"\x21\x12", b"\x12\x21\x12", bytes(range(7)),
+                    b"GEHEIM" * 3, bytes([1, 2]) * 5, b"\xff\x00\xff"):
+            p = _shortest_period(key)
+            self.assertEqual(len(key) % len(p), 0)
+            self.assertEqual(p * (len(key) // len(p)), key)
+
 
 class TestDecodeBlock(unittest.TestCase):
     def test_known_key(self):

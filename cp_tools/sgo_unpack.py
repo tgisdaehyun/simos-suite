@@ -27,7 +27,6 @@ Part of Simos-Suite (GPL-3.0).
 from __future__ import annotations
 
 import argparse
-import binascii
 import collections
 import math
 import os
@@ -160,9 +159,12 @@ def _bcb_decompress(stream: bytes) -> Tuple[Optional[bytes], Optional[int]]:
 
 
 def _shortest_period(key: bytes) -> bytes:
-    h = binascii.hexlify(key)
-    i = (h + h).find(h, 1, -1)
-    return key if i == -1 else binascii.unhexlify(h[:i])
+    """Reduce a repeating key to its fundamental period (operating on bytes, so
+    the boundary is always byte-aligned)."""
+    if not key:
+        return key
+    d = (key + key).find(key, 1, -1)
+    return key if d == -1 else key[:d]
 
 
 def _crack_xor_key(stream: bytes, target: int, klen: int) -> bytes:
