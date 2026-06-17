@@ -1030,10 +1030,13 @@ def read_block(
         else:
             raw = bytes(received)
 
-        # Decompress LZSS
+        # Decompress LZSS, then truncate to the block's exact uncompressed size.
+        # The VW LZSS decoder over-runs the real image by a few bytes (the
+        # encoder pads the final flag group); the block's UNCOMPRESSED-SIZE —
+        # here blk.length — is the authoritative cut point (VW '-e' behaviour).
         try:
             from flasher.lzss_compress import lzss_decompress
-            raw = lzss_decompress(raw)
+            raw = lzss_decompress(raw)[:expected_len]
         except Exception as e:
             log.debug("LZSS decompress: %s — returning raw encrypted bytes", e)
 

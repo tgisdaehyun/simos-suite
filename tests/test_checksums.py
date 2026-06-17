@@ -22,6 +22,8 @@ Covers:
   18. FRF SA2 extract — matches known bytecode
   19. FRF → CRC32 round-trip — extract CAL, corrupt it, fix it, re-validate
   20. Block size constants — ecu_defs match ODX-confirmed values
+  21. LZSS faithful-VW decode — real Simos18.1 AES+LZSS → CRC32 (CBOOT/ASW1/CAL)
+  22. LZSS faithful-VW compress — real-file functional round-trip (CBOOT/CAL)
 
 Run standalone:
     python -m tests.test_checksums
@@ -102,6 +104,56 @@ def _find_key(repo: pathlib.Path) -> pathlib.Path | None:
         if p.exists():
             return p
     return None
+
+
+# ── Simos18.1 (5G0906259K) real-file LZSS decode fixtures ───────────────────────
+# Public device-class AES-CBC key/IV for Simos18.1 flashdaten.
+_S18_AES_KEY = bytes.fromhex("98D31202E48E3854F2CA561545BA6F2F")
+_S18_AES_IV  = bytes.fromhex("E7861278C508532798BCA4FE451D20D1")
+# Per-block flash base address (for the CRC32 area header) and the ODX
+# UNCOMPRESSED-SIZE — the exact-length cut point after VW-LZSS decode.
+_S18_BASE   = {1: 0x8001C000, 2: 0x80040000, 3: 0x80140000, 4: 0x80880000, 5: 0xA0800000}
+_S18_UNCOMP = {1: 146944, 2: 1047552, 3: 785408, 4: 523264, 5: 523264}
+_S18_HDR_OFFSETS = {k: 0x300 for k in range(1, 7)}
+# CBOOT(1), ASW1(2), CAL(5) carry a single-area CRC32 at 0x300 that validates
+# against this base map. ASW2(3)/ASW3(4) use a different / multi-area checksum
+# layout and are out of scope here (they don't validate under the single-base
+# model — calc=0 / mismatch, same as VW_Flash's per-block handling).
+_S18_CRC_BLOCKS = (1, 2, 5)
+
+
+def _find_simos18_frf() -> pathlib.Path | None:
+    """Locate the real Simos18.1 5G0906259K FRF for the LZSS decode test."""
+    candidates = [
+        pathlib.Path(r"D:\ECU FLASH\FlashDaten\Flashdaten_Volkswagen_20201020_op5fy")
+        / "FL_5G0906259K__0001.frf",
+        pathlib.Path("/mnt/user-data/uploads/FL_5G0906259K__0001.frf"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def _decode_s18_blocks(key_path, frf_path) -> dict:
+    """
+    Run the real decode chain for every block of the Simos18.1 FRF:
+        FRF → extract_blocks → AES-CBC decrypt → VW-LZSS decompress
+            → truncate to UNCOMPRESSED-SIZE
+    Returns {block_num: image_bytes}.
+    """
+    from flasher.frf_loader import FrfLoader
+    from flasher.lzss_compress import lzss_decompress
+    from Crypto.Cipher import AES
+
+    loader = FrfLoader(str(key_path))
+    blocks = loader.extract_blocks(str(frf_path))
+    out = {}
+    for bn, data in blocks.items():
+        nn = len(data) - (len(data) % 16)             # CBC needs whole blocks
+        dec = AES.new(_S18_AES_KEY, AES.MODE_CBC, _S18_AES_IV).decrypt(data[:nn])
+        out[bn] = lzss_decompress(dec)[: _S18_UNCOMP.get(bn, len(dec))]
+    return out
 
 
 # ── Synthetic block builders ───────────────────────────────────────────────────
@@ -211,6 +263,9 @@ def run_all(repo: pathlib.Path):
     print("\n  ── LZSS ─────────────────────────────────────────────────────────")
     _test_lzss_roundtrip()
     _test_lzss_runlength()
+    _lzss_key = _find_key(repo)
+    _test_lzss_real_decode(_lzss_key)
+    _test_lzss_real_roundtrip(_lzss_key)
 
     print("\n  ── Workshop code ────────────────────────────────────────────────")
     _test_workshop_code_length()
@@ -421,6 +476,67 @@ def _test_lzss_runlength():
     x = bytes([0x00] * 64 + [0xAA] * 64) + b"\x11\x22" * 400
     out = lzss_decompress(lzss_compress(x))[:len(x)]
     _test("LZSS — run-length / overlap regression", out == x, f"in={len(x)}")
+
+
+def _test_lzss_real_decode(key_path):
+    """
+    Faithful-VW proof: AES-CBC-decrypt a REAL Simos18.1 (5G0906259K) FRF,
+    VW-LZSS decompress, truncate to the ODX UNCOMPRESSED-SIZE, and assert the
+    recomputed VW-CRC32 matches the stored 0x300 block-checksum header for
+    CBOOT/ASW1/CAL.
+
+    This is the test the previous (self-consistent-but-wrong) LZSS could never
+    pass — it decoded real flashdaten into ~10x oversized garbage. SKIPs cleanly
+    when the FRF or frf.key isn't present on this host.
+    """
+    name = "LZSS — real Simos18.1 decode → CRC32 (CBOOT/ASW1/CAL)"
+    frf_path = _find_simos18_frf()
+    if not key_path or not frf_path:
+        _test(name, True, "SKIP (5G0906259K FRF or frf.key not on this host)")
+        return
+    try:
+        from flasher.checksum_simos import validate_crc32
+        imgs = _decode_s18_blocks(key_path, frf_path)
+        results, ok = {}, True
+        for bn in _S18_CRC_BLOCKS:
+            valid, stored, calc = validate_crc32(
+                imgs[bn], bn,
+                base_addresses=_S18_BASE, header_offsets=_S18_HDR_OFFSETS)
+            results[bn] = (valid, stored, calc)
+            ok = ok and valid and stored == calc
+        detail = " ".join(
+            f"blk{bn}={'OK' if v else 'BAD'}(0x{s:08X}/0x{c:08X})"
+            for bn, (v, s, c) in results.items())
+        _test(name, ok, detail)
+    except Exception as e:
+        _test(name, False, repr(e))
+
+
+def _test_lzss_real_roundtrip(key_path):
+    """
+    Real-file functional round-trip (the BIN→flash pack path uds_flash uses):
+    decode CBOOT+CAL from the Simos18.1 FRF, re-compress with the faithful
+    encoder, decompress again, and assert the image is reproduced exactly
+    (truncated to UNCOMPRESSED-SIZE). LZSS streams need not be byte-identical
+    to VW's — only functionally equivalent under the ECU's decompressor.
+    """
+    name = "LZSS — real Simos18.1 compress round-trip (CBOOT/CAL)"
+    frf_path = _find_simos18_frf()
+    if not key_path or not frf_path:
+        _test(name, True, "SKIP")
+        return
+    try:
+        from flasher.lzss_compress import lzss_compress, lzss_decompress
+        imgs = _decode_s18_blocks(key_path, frf_path)
+        bad = []
+        for bn in (1, 5):
+            img = imgs[bn]
+            back = lzss_decompress(lzss_compress(img, exact_pad=True))[:len(img)]
+            if back != img:
+                bad.append(bn)
+        _test(name, not bad, f"blocks=[1,5] failed={bad}")
+    except Exception as e:
+        _test(name, False, repr(e))
 
 
 # ── Workshop code tests ────────────────────────────────────────────────────────
