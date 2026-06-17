@@ -16,6 +16,8 @@ from flasher.hvac_flash import (
     HVAC_HI0113_PATCH,
     HVAC_LO0113_PATCH,
     select_patch_set,
+    locate_guard_pair,
+    signature_guard_sites,
 )
 
 
@@ -104,10 +106,68 @@ class TestPatchBlock1LO(unittest.TestCase):
         ok, _, _ = verify_block1_crc(out)
         self.assertTrue(ok)
 
-    def test_lo_sites_are_entry_force_return(self):
-        # both LO sites overwrite the first instruction with "mov <v>,r10 ; jmp [lp]"
-        for site in HVAC_LO0113_PATCH:
-            self.assertEqual(site.new[2:], bytes.fromhex("7f00"))  # jmp [lp]
+    def test_lo_sites_are_getter_plus_guard_nops(self):
+        # Corrected LO patch (2026-06-16) = ONE 4-byte getter force-return
+        # ("mov <v>,r10 ; jmp [lp]" -> ...7f00) PLUS two 2-byte guard NOPs (0000).
+        getters = [s for s in HVAC_LO0113_PATCH if len(s.new) == 4]
+        nops = [s for s in HVAC_LO0113_PATCH if len(s.new) == 2]
+        self.assertEqual(len(getters), 1)
+        self.assertEqual(getters[0].new[2:], bytes.fromhex("7f00"))  # jmp [lp]
+        self.assertEqual(len(nops), 2)
+        for s in nops:
+            self.assertEqual(s.new, bytes.fromhex("0000"))           # NOP'd BNE guard
+
+
+def _guarded_block(g1_off: int = 0x5000, mid: bytes = b"\xee\xbb\x63\x52",
+                   dup: bool = False) -> bytes:
+    """Build a synthetic 2-zone-class image carrying the unique guard pair
+    (da0dbfff <mid> 9a0dbfff). Non-0xFF filler so no stray pair appears. If dup,
+    embed a SECOND pair to exercise the ambiguity guard."""
+    size = 0x20000
+    buf = bytearray(b"\x11" * size)
+    def place(off):
+        buf[off:off + 4] = bytes.fromhex("da0dbfff")
+        buf[off + 4:off + 8] = mid
+        buf[off + 8:off + 12] = bytes.fromhex("9a0dbfff")
+    place(g1_off)
+    if dup:
+        place(g1_off + 0x800)
+    crc = crc16_xmodem(bytes(buf[:-2]))
+    buf[-2] = crc & 0xFF; buf[-1] = (crc >> 8) & 0xFF
+    return bytes(buf)
+
+
+class TestSignatureGuards(unittest.TestCase):
+    """The SW-version-portable guard-signature locator (works on non-0113 builds)."""
+
+    def test_locates_unique_pair(self):
+        self.assertEqual(locate_guard_pair(_guarded_block(0x5000)), 0x5000)
+
+    def test_absent_pair_returns_none(self):
+        self.assertIsNone(locate_guard_pair(b"\x11" * 0x20000))
+
+    def test_ambiguous_pair_raises(self):
+        with self.assertRaises(FirmwareMismatch):
+            locate_guard_pair(_guarded_block(0x5000, dup=True))
+
+    def test_signature_sites_are_two_guard_nops(self):
+        sites = signature_guard_sites(_guarded_block(0x5000))
+        self.assertEqual([s.offset for s in sites], [0x5000, 0x5008])
+        for s in sites:
+            self.assertEqual(s.new, bytes.fromhex("0000"))
+            self.assertEqual(s.orig[0:1] + s.orig[1:2], s.orig[:2])  # 2-byte BNE opcode
+
+    def test_allow_signature_patches_unknown_sw(self):
+        # an image that matches NO fixed set but carries the guard pair: refused by
+        # default, patched (guards-only) under allow_signature=True, with valid CRC.
+        blk = _guarded_block(0x5000)
+        self.assertIsNone(select_patch_set(blk)[1])
+        with self.assertRaises(FirmwareMismatch):
+            patch_block1(blk)                       # default: refuse unknown SW
+        out = patch_block1(blk, allow_signature=True)
+        self.assertEqual(out[0x5000:0x5002], bytes.fromhex("0000"))
+        self.assertEqual(out[0x5008:0x500a], bytes.fromhex("0000"))
+        self.assertTrue(verify_block1_crc(out)[0])
 
 
 class TestAutoSelect(unittest.TestCase):
