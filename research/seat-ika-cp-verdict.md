@@ -32,7 +32,7 @@ verify_pass  ⇔  stored_block0  ==  AES-128( challenge , K )
 
 ### The one disagreement across the three traces — what is K?
 
-- **VERIFY trace:** K is one of **three module-FIXED flash constants** (`K5/K6/K7` immediately before the S-box: `16f45463…`, `c93e58a1…`, `2d508ab8…`), identical across same-SW modules. Exhaustive sweep showed `block0 ≠ AES/DEC(block1)` under any of them → expected is an *independent* per-vehicle ciphertext.
+- **VERIFY trace:** K is one of **three module-FIXED flash constants** (`K5/K6/K7` immediately before the S-box; file offsets `0x9f2c`/`0x9f3c`/`0x9f4c`, S-box @`0x9f5c`, standard FIPS-197 AES): `K5=16f45463bb3db44eeb35df537f8dfd6b`, `K6=c93e58a121f00277912580785e1ad506`, `K7=2d508ab80b42aef16e2335a70811c67d` — identical across same-SW modules. Exhaustive sweep showed `block0 ≠ AES/DEC(block1)` under any of them → expected is an *independent* per-vehicle ciphertext.
 - **CS-SOURCE trace:** K is the **IKA blob itself** — block1 → `gp-0x5180` (slot `0x66`) is loaded as the AES key from data-flash; the three fixed constants are only the **rw==0 "no row present" factory-default/KAT seed path**, not the live key.
 
 **Reconciliation:** these are consistent if there are *two* AES uses — the fixed `K5/K6/K7` drive the slot5→6→7 transform of the incoming challenge, while the per-vehicle block1 keys a separate transform binding the two halves. Either way the conclusion is the same: **no per-vehicle secret is baked in flash, and nothing is server-held.** The per-vehicle material is entirely in owner-writable data-flash. This sharpens, rather than weakens, the verdict.
