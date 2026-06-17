@@ -4418,6 +4418,79 @@ class FlashwareTab(_Tab):
             self._append_log(self._log, f"repack SGO error: {ex}\n", "err")
 
 
+class CPLabTab(_Tab):
+    """Offline Component-Protection cipher bench — gateway AES model + HVAC IKA self-test."""
+
+    def __init__(self, parent, mw):
+        super().__init__(parent, mw)
+
+        _section(self, 'J533 gateway CP cipher  (AES-128, key "LEAR D4 Gateway.")')
+        g = _frame(self)
+        g.pack(fill="x", padx=14, pady=(2, 4))
+        tk.Label(g, text="block (32 hex):", fg=C["muted"], bg=C["bg"],
+                 font=("Menlo", 10)).pack(side="left")
+        self._gw = tk.StringVar(value="01020304050607080807060504030201")
+        tk.Entry(g, textvariable=self._gw, bg=C["bg"], fg=C["text"],
+                 insertbackground=C["text"], font=("Menlo", 10), bd=0,
+                 highlightbackground=C["border"], highlightthickness=1,
+                 width=36).pack(side="left", padx=6, ipady=2)
+        gb = _frame(self)
+        gb.pack(fill="x", padx=14, pady=(0, 4))
+        _btn(gb, "gw_enc", lambda: self._gw_op(True)).pack(side="left")
+        _btn(gb, "gw_dec", lambda: self._gw_op(False)).pack(side="left", padx=6)
+        _btn(gb, "Run KAT", self._gw_kat).pack(side="left")
+
+        _section(self, "HVAC J255 IKA handshake model")
+        hb = _frame(self)
+        hb.pack(fill="x", padx=14, pady=(2, 4))
+        _btn(hb, "Run IKA self-test", self._hvac_selftest).pack(side="left")
+
+        self._log = _log_widget(self, height=15)
+        self._append_log(
+            self._log,
+            "Offline CP cipher models. validate() + BDM-dump ingest need real bench\n"
+            "data (CS / identity / data-flash) and stay CLI/bench-gated. See research/.\n\n",
+            "dim")
+
+    def _gw_op(self, enc):
+        try:
+            from cp_tools.gw_cp_cipher import gw_enc, gw_dec
+            b = bytes.fromhex(self._gw.get().strip().replace(" ", ""))
+            if len(b) != 16:
+                raise ValueError("need exactly 16 bytes (32 hex)")
+            out = (gw_enc if enc else gw_dec)(b)
+            self._append_log(self._log,
+                             f"{'gw_enc' if enc else 'gw_dec'}({b.hex()}) = {out.hex()}\n", "ok")
+        except Exception as ex:
+            self._append_log(self._log, f"error: {ex}\n", "err")
+
+    def _gw_kat(self):
+        self._run_capture("cp_tools.gw_cp_cipher", "selftest")
+
+    def _hvac_selftest(self):
+        self._run_capture("cp_tools.hvac_ika_cipher", "_selftest")
+
+    def _run_capture(self, mod, fn):
+        def work():
+            import io, importlib, contextlib
+            buf = io.StringIO()
+            try:
+                m = importlib.import_module(mod)
+                f = getattr(m, fn)
+                with contextlib.redirect_stdout(buf):
+                    rv = f()
+                self._ui(self._clear_log, self._log)
+                self._ui(self._append_log, self._log, buf.getvalue() or "(no output)\n")
+                self._ui(self._append_log, self._log,
+                         f"\n{mod}.{fn}() -> {rv}\n",
+                         "ok" if (rv or rv is None) else "warn")
+            except Exception as ex:
+                self._ui(self._append_log, self._log, buf.getvalue() or "")
+                self._ui(self._append_log, self._log, f"error: {ex}\n", "err")
+
+        self._run(work)
+
+
 class MainWindow(tk.Tk):
     """
     Root application window.
@@ -4547,6 +4620,7 @@ class MainWindow(tk.Tk):
             ("  flashware  ",   FlashwareTab),
             ("  logger  ",      LoggerTab),
             ("  cp tools  ",    CPToolsTab),
+            ("  cp lab  ",      CPLabTab),
             ("  raw sniff  ",   RawSniffTab),
             ("  diagnostics",   DiagTab),
             ("  trans  ",         TransLoggerTab),
