@@ -37,6 +37,20 @@ verify_pass  ⇔  stored_block0  ==  AES-128( challenge , K )
 
 **Reconciliation:** these are consistent if there are *two* AES uses — the fixed `K5/K6/K7` drive the slot5→6→7 transform of the incoming challenge, while the per-vehicle block1 keys a separate transform binding the two halves. Either way the conclusion is the same: **no per-vehicle secret is baked in flash, and nothing is server-held.** The per-vehicle material is entirely in owner-writable data-flash. This sharpens, rather than weakens, the verdict.
 
+### 2026-06 refinement: the runtime challenge is **deterministic per-vehicle, not a fresh nonce** (the "nonce" failure branch is architecturally excluded)
+
+The verify (`FUN_00036cda` case 7) is a **stored-answer comparison**: it memcmps `AES(challenge,K)` against a value held in the module's *own* data-flash and sets a *local* limp byte (`FUN_0003729c`). It is **not** a live challenge-response where the module computes a reply the gateway then checks. That distinction settles the decision tree's decisive gate by pure logic, no bench data needed:
+
+> For the stored answer (`stored_block0`) to keep matching `AES(challenge,K)` on **every drive cycle with no re-pairing**, the runtime `challenge` must be a **fixed per-vehicle value**. A fresh per-session nonce would make the stored answer stale on the next key-on — impossible for a persisted, re-validated credential. ⟹ **the challenge is deterministic per-vehicle.**
+
+Consequences:
+1. **The "external nonce → must firmware-patch" branch is eliminated.** The only architecturally-consistent reading of a stored-answer verify is a stable challenge. (Residual: this flips only if the RE mis-identified the mechanism as stored-answer when it is actually challenge-response — but case 7's memcmp-vs-own-NVM + local-limp-byte is unambiguous in the decompile.)
+2. **A single passive bus capture of the challenge is a *permanent* fix-enabler, not just a diagnostic.** Because the value is stable, sniffing one handshake yields it forever; you then compute `block0 = AES(challenge,K)` offline once and write it via `0x3B/0xBE`. Whether the stable value is `f(owner-CS)` or a fixed GeKo-issued token becomes **moot for the fix** — it matters only for whether you could derive it with *zero* captures.
+
+### 2026-06: offline back-out from the captured ODIS IKA does **not** shortcut the capture
+
+Tried to recover the challenge from data already in hand — the unmasked Feb-2024 IKA blob (`block0 = E62B41D1…0AC2`) + the extracted fixed keys: `AES⁻¹(block0, K5/K6/K7/block1)` (single and slot-cascade, plus byte-reversed) yields **no structured/recognizable value** (every candidate is 13–16 distinct bytes, no ASCII, no VIN/CS match). The forward test also fails: the only immobilizer value the log exposes — `D6 A4 E4 99`, read from Kessy via `Service22Generic` local-ID `740`, stable across both reads — padded to 16 bytes any obvious way does **not** reproduce `block0`/`block1` under any key. So `f` is non-trivial and `D6A4E499` (4 bytes) is at most a fragment/auth-check, not the raw challenge. **The one-time live capture remains required to obtain the challenge bytes** — but per the refinement above, it is one-time and permanent.
+
 ---
 
 ## 3. THE VERDICT
@@ -54,7 +68,7 @@ verify_pass  ⇔  stored_block0  ==  AES-128( challenge , K )
 
 If step 2 shows `challenge = f(CS)`: **fully (a)** — compute `block0 = AES(f(CS), K)` offline from the Kessy-readable CS and write it via `0x3B/0xBE`/TrainICA. **No firmware patch, no GeKo, no SecurityAccess** (the `0xBE` branch checks only `(1<<session)&5` — accepted in default session 0).
 
-If step 2 shows an external nonce: **firmly (b)** — the *challenge* is server/gateway-issued and you cannot precompute the expected ciphertext; you'd fall back to a firmware status-patch (the `FUN_0003729c` limp branch), which violates the no-patch constraint.
+If step 2 shows the stable challenge is a fixed gateway-held token (not owner-CS-derivable): still **(a)-by-capture** — because the value is deterministic (see the 2026-06 refinement above), one passive sniff captures it permanently and you write `block0 = AES(challenge,K)` once. The firmware status-patch fallback (`FUN_0003729c` limp branch) is now only relevant if the bus is physically uncapturable, **not** because of any nonce.
 
 **Confidence:** High that it is *not* GeKo-locked. High that the write path is open without SA. Medium on the final CS-derivation gate — three independent static traces all point at CS-seeding (HVAC 2-pass model) but none is bit-exact without the data-flash read.
 
@@ -95,7 +109,7 @@ If step 2 shows an external nonce: **firmly (b)** — the *challenge* is server/
 
 ## What Remains Unknown (honest confidence)
 
-1. **DECISIVE:** `challenge = f(CS)` vs external nonce. *Everything* hinges on this. Three static traces lean CS-seeded; none is bit-exact. **(Resolve: bench dump `0x03FF9000` + one live handshake, or the bus-emulation experiment above.)** — confidence MEDIUM.
+1. ~~**DECISIVE:** `challenge = f(CS)` vs external nonce.~~ **RESOLVED to deterministic-per-vehicle by the 2026-06 refinement** (stored-answer verify ⟹ stable challenge ⟹ nonce branch excluded). Downgraded: the residual is only *which* deterministic input (owner-CS vs fixed gateway token) — and that no longer gates the fix, since a stable challenge is captured once and replayed forever. **(Capture: one passive handshake sniff.)** — confidence HIGH (deterministic), MEDIUM (exact input).
 2. **Which key is operative** (`K5/K6/K7` vs per-vehicle block1) and single-AES vs cascade — VERIFY and CS-SOURCE traces disagree on the role of the fixed constants. Resolvable by replaying one real `(challenge, expected)` pair. — confidence MEDIUM.
 3. **Erase/write interlock:** confirm J136 has no CP-record erase gate (HVAC had `FUN_00056414`) before assuming TrainICA write is unconditional in practice, and confirm persistence across power-cycle (NVM block ID for the IKA row not yet isolated). — confidence MEDIUM-HIGH (code strongly implies open + persistent).
 4. **UDS framing** to physically reach `0x3B/0xBE` (functional vs physical addressing, TesterPresent/session preamble, upstream router pre-checks in `FUN_00032xxx`). — confidence MEDIUM.
