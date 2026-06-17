@@ -4524,6 +4524,7 @@ class CPCaptureTab(_Tab):
         _btn(b2, "Start sniff", self._start, primary=True).pack(side="left")
         _btn(b2, "Stop", self._stop_capture).pack(side="left", padx=6)
         _btn(b2, "Save CSV…", self._save).pack(side="left")
+        _btn(b2, "Open CSV…", self._open_csv).pack(side="left", padx=6)
         _btn(b2, "Decode", self._decode, primary=True).pack(side="left", padx=6)
 
         self._status = tk.Label(self, text="idle", fg=C["dim"], bg=C["bg"],
@@ -4627,6 +4628,24 @@ class CPCaptureTab(_Tab):
             self._append_log(self._log, "saved %d frames -> %s\n" % (len(self._frames), out), "ok")
         except Exception as ex:
             self._append_log(self._log, "save error: %s\n" % ex, "err")
+
+    def _open_csv(self):
+        from tkinter import filedialog
+        import os
+        path = filedialog.askopenfilename(
+            title="Open capture CSV", filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            from cp_tools.can_decode import parse_csv
+            self._frames = parse_csv(path)
+        except Exception as ex:
+            self._append_log(self._log, "open CSV error: %s\n" % ex, "err")
+            return
+        self._append_log(self._log,
+                         "loaded %d frames from %s\n" % (len(self._frames), os.path.basename(path)), "hdr")
+        self._set_status("loaded %d frames" % len(self._frames), C["dim"])
+        self._decode()
 
     def _decode(self):
         if not self._frames:
