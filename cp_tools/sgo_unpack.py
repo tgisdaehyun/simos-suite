@@ -215,9 +215,14 @@ def _decode_block(blob: bytes, declen: int) -> Tuple[bytes, Crypto, bytes, str]:
         data, mode, key = bcb
         note = "key=%r" % key.decode("latin1") if key else "no-key"
         return data, mode, key, note + " csum-OK"
-    # no BCB header: AES vs plain
-    if declen % 16 == 0 and len(blob) == declen and _entropy(x[:8192]) > 7.5:
-        return b"", Crypto.AES, b"", "AES-encrypted (key required)"
+    # no BCB header: AES-encrypted vs genuinely plain. Normalise entropy to the
+    # block-size ceiling so small encrypted blocks (e.g. 128-byte EEPROM pages,
+    # which top out near 7 bits/byte even when encrypted) are still detected.
+    if declen % 16 == 0 and len(blob) == declen:
+        sample = x[:8192]
+        ceil = math.log2(min(256, max(2, len(sample))))
+        if _entropy(sample) / ceil > 0.88:
+            return b"", Crypto.AES, b"", "AES-encrypted (key required)"
     return x, Crypto.PLAIN, b"", "plain"
 
 

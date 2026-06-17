@@ -81,11 +81,17 @@ class TestDecodeBlock(unittest.TestCase):
         self.assertEqual(mode, Crypto.BCB)
 
     def test_aes_flagged(self):
-        os.urandom  # noqa
         blob = bytes((i * 167 + 13) % 256 for i in range(0x4000))  # 16-aligned, high entropy
         data, mode, key, note = _decode_block(blob, 0x4000)
         self.assertEqual(mode, Crypto.AES)
         self.assertEqual(data, b"")
+
+    def test_aes_small_block(self):
+        # 128-byte encrypted block tops out near 7 bits/byte but must still be
+        # flagged AES (entropy normalised to block size, not a flat 7.5 cutoff).
+        blob = bytes((i * 167 + 13) % 256 for i in range(128))
+        data, mode, key, note = _decode_block(blob, 128)
+        self.assertEqual(mode, Crypto.AES)
 
     def test_plain(self):
         blob = _xor(b"\x00" * 512, b"\xFF")        # low entropy, no BCB header
