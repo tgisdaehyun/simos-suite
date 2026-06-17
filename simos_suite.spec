@@ -29,6 +29,11 @@ from PyInstaller.utils.hooks import collect_submodules
 _core_imports = collect_submodules('core')
 _ui_imports   = collect_submodules('ui')
 _tests_imports = collect_submodules('tests')
+# flasher/ + cp_tools/ are imported lazily (inside functions) by the GUI, so
+# PyInstaller static analysis misses them — collect every submodule explicitly
+# so the FRF/SGO codecs, payload_codec, cipher models, etc. survive freezing.
+_flasher_imports = collect_submodules('flasher')
+_cptools_imports = collect_submodules('cp_tools')
 
 # Collect all email submodules — pkg_resources runtime hook needs them
 _email_imports = collect_submodules('email')
@@ -46,6 +51,11 @@ a = Analysis(
     datas=[
         # Ship the CP research data file so the routine ID is available offline
         ('cp_tools/cp_routine_id.json', 'cp_tools'),
+        # Runtime data loaded by __file__-relative path — MUST be bundled or the
+        # frozen EXE breaks: FRF decode (frf.key), module DB, and DTC lookup.
+        ('data/frf.key',               'data'),
+        ('data/c7_module_db.json',     'data'),
+        ('data/dtcs.csv',              'data'),
         # Ship the docs for the about dialog / help
         ('docs/tuning_guide_s85.md',   'docs'),
         ('docs/odx_findings.md',       'docs'),
@@ -58,6 +68,8 @@ a = Analysis(
           *_core_imports,
           *_ui_imports,
           *_tests_imports,
+          *_flasher_imports,
+          *_cptools_imports,
           'pkg_resources',
           'pkg_resources._vendor',
           'pkg_resources.extern',

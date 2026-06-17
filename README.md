@@ -1,109 +1,195 @@
 # Simos Tuning Suite
 
-Free, open-source ECU tuning, diagnostics, and right-to-repair tooling for
-Volkswagen Auto Group vehicles.
+A Windows-first, open-source toolkit for **flashing, reading, diagnosing, and
+researching** Volkswagen Auto Group (Audi / VW) engine and transmission control
+units. It pairs a full UDS programming engine with a no-install GUI, bidirectional
+FRF/ODX/SGO container codecs, and a Component-Protection (CP) research suite —
+built for owners who want to service their own cars.
+
+It runs as a single unsigned Windows x64 EXE or from source, talks to cheap
+ESP32 ISO-TP bridges (BLE / USB / WiFi) and standard J2534 cables, and runs the
+**entire GUI with zero hardware** via a built-in Simos8.5 simulator.
 
 **Primary target:** Simos8.5 — 3.0T TFSI CGWA/B (C7 A6/A7/A8)
-**Also supported:** Simos12/18 (2.0T EA888), ZF 8HP, DL501, DQ250-MQB, DQ381-MQB
+**Also supported:** Simos12 / 12.2 / 18.1 / 18.10 / TTRS (EA888/EA855), ZF 8HP, DL501, DQ250, DQ381
 
 Companion repos:
-- [esp32-isotp-ble-bridge-c7vag](https://github.com/dspl1236/esp32-isotp-ble-bridge-c7vag) — ESP32 BLE bridge firmware
-- [VAG-CP-Docs](https://github.com/dspl1236/VAG-CP-Docs) — Component Protection research
+- [esp32-isotp-ble-bridge-c7vag](https://github.com/dspl1236/esp32-isotp-ble-bridge-c7vag) — ESP32 BLE/USB bridge firmware
+- [VAG-CP-Docs](https://github.com/dspl1236/VAG-CP-Docs) — Component-Protection research writeups
 
 ---
 
-## ⚠️ Status: alpha — read before you write
+## ⚠️ Status — read before you write
 
-**Work in progress.** This is built in the open as the tooling gets developed —
-expect rough edges, missing pieces, and features that are wired but unconfirmed.
+This is built in the open, pre-1.0, **unsigned**, and shipped so the community can
+build on it. Maturity is mixed and labeled honestly throughout this README and in
+the GUI itself.
 
-- **Read-only features** (ECU Info, Logger, Raw Sniff, Trans live data) are
-  low-risk — worst case, they misread something.
-- **Write features** (Flash, CP Tools → IKA write / constellation update) are
-  **experimental and not fully validated on hardware.** The flash write path is
-  implemented but **disabled in the GUI** pending hardware validation, and the
-  CP routine (`0x0226`) is wired but unconfirmed. Check the feature table below
-  before trusting any of them.
+- **Read-only paths are mature and safe** — ECU Info, Logger, Trans live data,
+  bus scan, DTC read, raw CAN sniff, and all offline container/checksum tooling.
+  Worst case they misread something.
+- **The ECU/TCU flash *write* path is implemented but GUI-disabled** pending
+  hardware validation. The read → checksum → compress → encrypt → write pipeline
+  exists end-to-end; the write buttons sit behind a banner. **Read/verify work
+  today.**
+- **CP write / routine actions are experimental and bench-gated.** The IKA-key
+  write, J533 constellation update, and HVAC CP-patch flasher are wired but
+  **unconfirmed on hardware** (the HVAC flasher defaults to dry-run).
 
-**Flashing an ECU/TCU can brick it.** Do not use the flash/write features on a
-vehicle you can't afford to recover — have a bench setup (boot-mode / BDM) or a
-verified known-good backup *first*. **No warranty whatsoever** (GPL §15–16).
-You run this entirely at your own risk.
+**Flashing an ECU/TCU can brick it.** Don't run write features on a car you can't
+recover — have a bench (boot-mode / BDM) setup and a verified known-good backup
+*first*. **No warranty whatsoever** (GPL §15–16). You run this entirely at your
+own risk.
 
-Unsigned, pre-1.0, not done — and shipped anyway so the community can build on
-it. Bench reports and PRs welcome.
+This is a right-to-repair project on the author's own vehicle. The CP work is
+**research** — it does not, and is not intended to, defeat cryptographic
+signatures (see [Status & honesty](#status--honesty)).
 
 ---
 
 ## Download
 
-**[SimosSuite.exe — latest](https://github.com/dspl1236/simos-suite/releases/latest)**  (Windows x64, ~30 MB)
+**[SimosSuite.exe — latest release](https://github.com/dspl1236/simos-suite/releases/latest)** (Windows x64, single file, no install)
 
-Windows x64, single file, no install. It's an **unsigned alpha build** —
-SmartScreen will flag it; "More info" → "Run anyway" if you trust it, or run
-from source (see Quick start). Read the ⚠️ status above before using any write
-feature. GPL v3.
+It's an **unsigned build** — SmartScreen will flag it; "More info" → "Run anyway"
+if you trust it, or run from source (see [Install](#install)).
 
 ---
 
-## Why this exists
+## Features
 
-Replacing a used HVAC module in your C7 A6 requires a dealer visit and a live
-connection to VW's servers — to re-authorize a $40 part you already own.
-Component Protection is well-documented in VAG-CP-Docs. This suite provides the
-tooling to do it yourself.
+### Engine / TCU flashing & reading
+
+- **Full UDS flash engine** (`flasher/uds_flash.py`) for Simos8.5 / 12 / 12.2 /
+  18.1 / 18.10 / TTRS: extended → programming session, SA2 seed/key unlock, block
+  erase, RequestDownload / TransferData, exit + verify. Drives the complete
+  **checksum-fix → LZSS-compress → XOR(Simos8)/AES-CBC(Simos12+) encrypt** pipeline.
+  *(Write is GUI-disabled pending hardware validation; read/verify work today.)*
+- **Virtual block read** (UDS RequestUpload, `read_block`) pulls CBOOT / ASW1 / CAL
+  off a live ECU and decrypts + LZSS-decompresses to a flat image for the
+  read → edit → reflash workflow.
+- **CAL / multi-block flash UI** in the Flash tab: open `.bin` or `.frf`, read CAL
+  from the ECU, verify checksum. Write buttons present but gated.
+- **VIN utilities** (`flasher/vin_utils.py`): read / write / validate the ECU VIN
+  (DID 0xF190) with SA2-gated write + read-back verify, and an ECU-vs-chassis VIN
+  comparison (tuner-lock aware).
+
+### FRF / ODX / SGO decode + repack
+
+- **FRF decrypt + extract** (`flasher/frf_loader.py`): rolling-XOR with `frf.key`
+  → ZIP → ODX, extracting flash blocks and the SA2 script. *(This is the codec
+  path surfaced in the GUI — Flash tab → "open .frf".)*
+- **FRF repack** (`flasher/frf_pack.py`): rebuild an FRF from edited blocks with
+  per-DATABLOCK CRC32 recompute, re-zip (VAG profile), re-encrypt. Functional —
+  decompressed image is byte-identical; the compressed stream differs. *(CLI/lib.)*
+- **Payload-codec matrix** (`flasher/payload_codec.py`): detect + apply the
+  per-block transform (RAW `0x00` / Simos counter-XOR `0x01` / Bosch-LZSS-AES
+  `0xAA`) that turns a tuned BIN into on-ODX bytes. *(CLI round-trip diagnostic.)*
+- **Faithful VW LZSS** (`flasher/lzss_compress.py`): a 1023-window, space-init port
+  matching the ECU's on-board decompressor.
+- **SGO (SGML Object File) unpack** (`cp_tools/sgo_unpack.py`): parse container
+  metadata + decode blocks, auto-detecting plain / BCB / BCB-XOR (keyless
+  repeating-XOR crack verified by the block's own 24-bit checksum) / AES.
+- **SGO repack** (`cp_tools/sgo_pack.py`): **byte-exact** inverse — proven on
+  69/69 real files. *(Plus `cp_tools/bcb_compress.py`, the inverse of the BCB
+  oracle; note it is not VW's real on-disk 1A-escape BCB — documented gap.)*
+
+### Component-Protection research tooling
+
+> Right-to-repair research on the author's own car. See
+> [Status & honesty](#status--honesty) and `research/`.
+
+- **J533 + J255 CP probe** (`cp_tools/j533_probe.py`): read constellation DID
+  `0x04A3`, sub-DIDs `0x2A2x`, and IKA/GKA keys (`0x00BE` / `0x00BD`) across
+  enrolled modules; decode the constellation; (experimentally) start the CP
+  routine; emit a full JSON report. Backs the **CP Tools** GUI tab.
+- **Gateway CP cipher model** (`cp_tools/gw_cp_cipher.py`): a *proven* software
+  model of the J533 LEAR gateway CP cipher (standard AES-128, key
+  `"LEAR D4 Gateway."`); 8-vector known-answer test **closed**. `enc`/`dec` CLI.
+- **HVAC IKA handshake model** (`cp_tools/hvac_ika_cipher.py`): a faithful 1:1 port
+  of the J255 V850 stream+AES key-confirm FSM; `validate()` tests
+  `IKA == f(CS, identity)`. **Bit-exactness pending a bench block0 BDM read.**
+- **BDM-dump ingest** (`cp_tools/ingest_bdm_dump.py`): splice bench-read cipher
+  tables / IKA / CS rows into the HVAC model and run `validate()` for a yes/no
+  offline-forge verdict. *(Bench-gated.)*
+- **Standalone HVAC CP-bypass flasher** (`flasher/hvac_flash.py`): a plain-block
+  UDS flasher for the J255 Climatronic V850 — identify, read block1, apply the
+  CP-defrost-limp bypass patch (auto HI/LO select + signature-located guard NOP),
+  recompute CRC-16/XMODEM, flash. **Refuses unknown firmware; defaults to
+  dry-run.** *(Bench-gated.)*
+- **ODX + MWB analyzers** (`cp_tools/odx_parser.py`, `cp_tools/mwb_extract.py`):
+  extract CP routine ID, security level, SA2 bytecode, DID/routine maps from ASAM
+  ODX, and pull the CP RoutineControl ID from ODIS `.sd.db`.
+
+### Checksums
+
+- `flasher/checksum_simos.py` — **CRC32-VW** (poly `0x4C11DB7`), **ECM3** 64-bit
+  summation validate/fix (with early/late ASW1 offset auto-detect), and **Simos
+  counter-XOR** encrypt/decrypt.
+- `flasher/workshop_code.py` — VW flash workshop-code (DID 0xF15A) generator: BCD
+  date + CRC8 of ASW + CAL fingerprint bytes.
+
+### Data logging & diagnostics
+
+- **Live DID logger** (`logger/`): threaded multi-channel poll with scaling, ring
+  buffer, and CSV export; gauge grid + configurable interval in the Logger tab.
+- **Transmission live data** (`ui/trans_tab.py`, `core/trans_defs.py`): read-only
+  telemetry for ZF8HP / DL501 / DQ250 / DQ381 — gear, selector, ATF temp, shaft
+  speeds, torque, clutch / line pressure, status flags, with a gear visual.
+- **Bus scan + DTCs**: probe every known C7 module address to build an installed
+  list, read stored/pending DTCs (UDS `0x19`) against a ~692-entry DTC database
+  (`data/dtcs.csv`), and clear them (UDS `0x14`).
+- **Passive CAN sniffer** (`lib/connections/can_sniffer.py` + Raw Sniff tab):
+  receive-only J2534 raw-CAN capture with software ISO-TP reassembly, UDS service
+  decode, and PCAP export — sits on an OBD splitter alongside VCDS / ODIS.
+
+### GUI
+
+- Single **Tkinter** app (`ui/main_window.py`, **v0.3.3**), dark "macOS terminal"
+  theme, pure stdlib — no Qt, no web.
+- One `ttk.Notebook` with **8 tabs**: Connect · ECU Info · Flash · Logger ·
+  CP Tools · Raw Sniff · Diagnostics · Trans.
+- Ships as one unsigned Windows x64 EXE and runs the **whole GUI with no hardware**
+  via the built-in Simos8.5 simulator.
+
+### Connections
+
+- **ESP32 ISO-TP bridge** over **BLE** (GATT UUID `0xABF0`), **USB-serial**
+  (250000 baud), and **WiFi WebSocket** ("FunkBridge") — one `0xF1`-header framing,
+  one udsoncan-compatible connection abstraction.
+- **J2534** PassThru (Tactrix / Mongoose / VNCI / SL1) with a known-path list +
+  Windows-registry (`PassThruSupport.04.04`) auto-detect and a cable probe.
+- **Linux SocketCAN** (`SocketCAN_<iface>`).
+- **MOCK / DEMO** virtual Simos8.5.
+- **CerberusCAN** (a user-built Teensy 4.x tri-CAN OBD tool): **planned, not yet
+  integrated** — there is *no* Cerberus code in this repo (firmware, driver, or GUI
+  option). It is referenced only in `research/cerberuscan-cp-bench-plan.md`. See
+  [Connections](#connections) for the intended seam.
 
 ---
 
-## License
+## Install
 
-**GPL v3.** Free for personal use, free for right-to-repair. Any modified
-version must also be open source. See [LICENSE](LICENSE).
+Windows-first, but the Python source runs anywhere Tkinter does.
 
-If you're a shop charging $400 to run a 10-minute software operation, this tool
-is not for you — though the license doesn't stop you. The copyleft does.
-
----
-
-## Feature status
-
-| Tab | What it does |
-|-----|-------------|
-| **Connect** | Auto-detects BLE bridge (UUID 0xABF0), USB bridge (CP210x/CH340 VID:PID), J2534 DLL (registry scan), SocketCAN. Manual COM/path override. ECU selector for S85/SC1/SC2/SC8. |
-| **ECU Info** | Reads 18 standard VW DIDs — VIN, part numbers, FAZIT, mileage, session state, ASAM file ID. |
-| **Flash** | Read CAL from ECU (ReadMemoryByAddress) + verify checksum work today. The UDS write/flash sequence is implemented — extended session → SA2 → erase (0xFF00) → RequestDownload → TransferData → exit → verify (0x0202), with CheckProgrammingDependencies (0xFF01) as a separate step — but the write button is **disabled in the GUI** pending hardware validation (see ⚠️ status above). |
-| **Logger** | Live DID poller using `logger.LogSession` — 16 channels, configurable interval, CSV export. |
-| **CP Tools** | Full CP module scan — reads IKA key (DID 0x00BE) from all enrolled modules in one pass. J533 constellation probe, ODX parser. IKA key write + constellation update. CP routine ID 0x0226 wired in (pending hardware confirmation). |
-| **Raw Sniff** | Passive CAN bus listener via J2534 raw CAN channel. Use with OBD splitter alongside VCDS/ODIS to capture full UDS exchanges. ISO-TP reassembly, UDS service decode, PCAP export for Wireshark. |
-| **Diagnostics** | Bus scan — probes all known VAG module addresses and shows what's present. Reads stored/pending DTCs from all present modules (UDS 0x19) and clears DTCs from selected modules (UDS 0x14). |
-| **Trans** | ZF 8HP / DL501 / DQ250 / DQ381 live data — gear, selector, ATF temp, shaft speeds, torque, pressures. |
-
----
-
-## Quick start
+### From source
 
 ```bash
 git clone https://github.com/dspl1236/simos-suite
 cd simos-suite
 pip install -r requirements.txt
 pip install git+https://github.com/bri3d/sa2_seed_key.git
-
-# No hardware? Run the full GUI in simulation mode:
-python -m tests.sim_runner
-
-# Headless backend test:
-python -m tests.sim_runner --headless
-
-# Real hardware:
-python -m ui
-
-# Passive CAN sniffer (OBD splitter + J2534):
-# See Raw Sniff tab — captures VCDS/ODIS traffic without interfering
 ```
 
----
+Runtime deps (`requirements.txt`): `udsoncan>=1.21`, `bleak>=0.21`,
+`pyserial>=3.5`, `python-can>=4.0`, `numpy>=1.24`, `pycryptodome>=3.18`,
+`websocket-client>=1.6`, plus `sa2_seed_key` from source. J2534 PassThru DLLs are
+loaded at runtime via ctypes — install your cable's DLL separately.
 
-## Build the EXE yourself
+> **Headless / CI install** (no BLE/CAN hardware): just `pip install numpy` +
+> `sa2_seed_key` is enough to run the simulator and offline tools.
+
+### Build the EXE yourself
 
 ```bat
 git clone https://github.com/dspl1236/simos-suite
@@ -111,34 +197,167 @@ cd simos-suite
 build.bat
 ```
 
-`build.bat` installs all dependencies, runs the headless smoke test, and calls
-PyInstaller. Output: `dist\SimosSuite.exe` (~70–90 MB).
+`build.bat` installs dependencies, runs the headless smoke test, and calls
+PyInstaller. Output: `dist\SimosSuite.exe`. (`build.sh` does the same on POSIX.)
 
-Manual PyInstaller build:
+Manual build:
+
 ```bash
-pip install pyinstaller udsoncan bleak pyserial numpy pycryptodome python-can
+pip install pyinstaller udsoncan bleak pyserial websocket-client numpy pycryptodome python-can
 pip install git+https://github.com/bri3d/sa2_seed_key.git
 python build_exe.py
 ```
 
-GitHub Actions builds the EXE on every tagged release (`v*`) and publishes
-it to GitHub Releases automatically.
+`build_exe.py` wraps `pyinstaller simos_suite.spec --clean --noconfirm` with a
+pre-build smoke test and a spec-patch helper (handles missing icon/version and
+toggles UPX). The one-file spec produces `SimosSuite` (console off, logs to
+`%TEMP%\simos_suite.log`).
 
 ---
 
-## Hardware
+## Quick start
 
-| Interface | Type | Notes |
-|-----------|------|-------|
-| ESP32 BLE bridge | `BLE` | [dspl1236/esp32-isotp-ble-bridge-c7vag](https://github.com/dspl1236/esp32-isotp-ble-bridge-c7vag). Scan by GATT UUID 0xABF0. |
-| ESP32 USB bridge | `USBISOTP` | Same hardware, USB-C. Auto-detected by VID:PID (CP210x 10C4:EA60 or CH340 1A86:7523). |
-| SL1 J2534 (ESP32 shim) | `J2534` | Switchleg1 J2534 shim over the ESP32 bridge — ships a **64-bit** DLL, so it works from the x64 EXE. |
-| Tactrix OpenPort 2.0 | `J2534` | **32-bit DLL** — run from a 32-bit Python (see note). Good for block flashes. |
-| Mongoose / Drew Tech | `J2534` | **32-bit DLL** — 32-bit Python only. ⚠️ On Win11 the `dtmonpro.sys` kernel driver may be blocked by the WHQL driver-signing policy. |
-| VNCI 6154A | `J2534` | **Untested.** Must register under `PassThruSupport.04.04`; some clones only work through their own VCI Manager. |
-| SocketCAN | `SocketCAN_can0` | Linux only. Requires `iso-tp` kernel module. |
+### GUI
 
-> **J2534 architecture note:** the published **EXE is 64-bit**, so it can only load **64-bit** J2534 DLLs. Classic cables (Tactrix, Mongoose, VNCI) ship **32-bit** DLLs and fail to load in the EXE with `WinError 193` — run those from a **32-bit Python** (`python -m ui`). For the EXE, use the **ESP32 bridge (BLE/USB)** or the 64-bit **SL1** shim.
+```bash
+# No hardware? Run the full GUI in simulation (mock Simos8.5):
+python -m tests.sim_runner
+python simos_suite.py --sim
+
+# Headless backend smoke test:
+python -m tests.sim_runner --headless
+python simos_suite.py --headless
+
+# Real hardware (auto-detects interfaces):
+python -m ui
+python simos_suite.py            # same app, PyInstaller entry point
+python simos_suite.py --ecu SC8 --debug
+python simos_suite.py --version
+```
+
+### CLI one-liners (these entry points actually exist)
+
+```bash
+# --- Containers ---------------------------------------------------------------
+# Decrypt an FRF and dump its flash blocks to .bin:
+python -m flasher.frf_loader  path/to.frf --outdir out/
+python -m flasher.frf_loader  path/to.frf --sa2          # print SA2 script only
+
+# Detect + round-trip the FLASHDATA payload codec in an FRF/ODX:
+python -m flasher.payload_codec  path/to.frf
+
+# Unpack an SGO/SGML flashdaten container (auto-detect per-block transform):
+python -m cp_tools.sgo_unpack  file.sgo --out out/ --image flat.bin
+
+# Parse an ASAM ODX (CP routine ID, security level, SA2, DID/routine maps):
+python -m cp_tools.odx_parser  file.odx  out.json
+
+# --- Module database / bus ----------------------------------------------------
+# Look up / filter the C7 module firmware DB:
+python -m core.module_db  4G0820043
+python -m core.module_db  --candidates           # CP-patch candidates
+python -m core.module_db  --signed rsa           # filter by signing
+
+# Scan the live bus for installed modules:
+python -m core.module_scan  --iface J2534 --bus CONV
+
+# --- CP research (offline cipher models) --------------------------------------
+# J533 gateway CP cipher — known-answer self-test, then forge a record:
+python -m cp_tools.gw_cp_cipher                  # selftest (KAT)
+python -m cp_tools.gw_cp_cipher  enc  <32-hex-block>
+
+# HVAC IKA handshake model self-test:
+python -m cp_tools.hvac_ika_cipher
+
+# Splice a bench BDM dump into the HVAC model and run validate():
+python -m cp_tools.ingest_bdm_dump  --codeflash cf.bin --dataflash df.bin
+
+# --- HVAC CP-patch flasher (bench-gated; dry-run by default) -------------------
+python -m flasher.hvac_flash  patchfile  in.bin out.bin   # offline patch a block
+python -m flasher.hvac_flash  flash      in.bin           # dry-run (add --go to write)
+```
+
+> `flasher/frf_pack.py`, `cp_tools/sgo_pack.py`, `cp_tools/bcb_compress.py`,
+> `flasher/checksum_simos.py`, `flasher/lzss_compress.py`, and
+> `flasher/vin_utils.py` are **library APIs** (no CLI `__main__`) — import them or
+> drive them via the test suite.
+
+---
+
+## Connections
+
+Selection is via the Connect tab (`ui/interface_panel.py`): auto-detected
+interfaces appear as clickable rows with status dots and bus-type badges, plus a
+manual-override combobox. Internally everything dispatches through
+`flasher/uds_flash.py:_make_connection`.
+
+| Interface | Key | Notes |
+|-----------|-----|-------|
+| ESP32 BLE bridge | `BLE` | Scan by GATT UUID `0xABF0`, `0xF1` framing. Flag `0x10` routes to Convenience CAN (MCP2515). |
+| ESP32 USB bridge | `USBISOTP` | Same hardware over USB serial @250000. Auto-detected by VID/PID (CP2102 / CH340 / ESP32-S3). |
+| ESP32 WiFi (FunkBridge) | `WIFI` | WebSocket transport, same framing, auto URL detect. |
+| J2534 PassThru | `J2534` | Tactrix / Mongoose / VNCI / SL1. Path-list + registry auto-detect, probed with PassThruOpen. |
+| Linux SocketCAN | `SocketCAN_<iface>` | Linux only (`iso-tp` kernel module). |
+| Mock / Demo | `MOCK` | Virtual Simos8.5 — drives the whole GUI with no hardware. |
+
+> **J2534 architecture note:** the published EXE is 64-bit and can only load
+> 64-bit J2534 DLLs. Classic cables (Tactrix, Mongoose, VNCI) ship 32-bit DLLs and
+> fail in the EXE with `WinError 193` — run those from a 32-bit Python
+> (`python -m ui`). For the EXE, use the ESP32 bridge (BLE/USB) or a 64-bit shim.
+
+### CerberusCAN status — *planned, not integrated*
+
+CerberusCAN is a user-built **Teensy 4.x** board with 3× FlexCAN channels intended
+to sit on the C7 Convenience CAN (100 kbps, pins 3+11) and run a UDS-responder /
+sniffer stack for CP bench experiments. **There is no Cerberus code in this repo**
+— no connection class, no serial handler, no GUI option. Only
+`research/cerberuscan-cp-bench-plan.md` describes it. The comfort bus also needs a
+custom VW TP 2.0 transport that does not exist here yet.
+
+The natural drop-in seam is the existing **USB-ISOTP framing**
+(`lib/connections/usb_isotp_connection.py`: `b"\xF1"` + cmd + rxid + txid + size +
+payload @250000 baud). A Cerberus that emits this exact framing would appear as a
+`USBISOTP` interface with near-zero Python changes (its PJRC/Teensy VID `0x16C0`
+would just need adding to the USB auto-detect).
+
+---
+
+## Project layout
+
+```
+simos_suite.py          # single-file entry point / launcher (--ecu/--sim/--headless/--version)
+build_exe.py, *.spec    # PyInstaller build (build.bat / build.sh wrappers)
+ui/                     # Tkinter GUI — main_window.py (8 tabs), interface_panel, trans_tab/logger
+flasher/                # UDS flash engine, FRF loader/pack, payload codec, LZSS, checksums,
+                        #   workshop code, VIN utils, HVAC CP flasher
+cp_tools/               # CP research — j533_probe, gw_cp_cipher, hvac_ika_cipher, sgo_unpack/pack,
+                        #   bcb_compress, odx_parser, mwb_extract, ingest_bdm_dump
+core/                   # ecu_defs, trans_defs, module_db, module_scan
+transport/              # ble_bridge, ws_bridge, interfaces (auto-detect registry)
+lib/connections/        # j2534 (ctypes) + j2534_connection, usb_isotp_connection, can_sniffer
+logger/                 # live polling logger engine
+data/                   # frf.key, c7_module_db.json (36 modules), dtcs.csv, dtc_lookup
+tests/                  # sim_runner (no-HW harness), sim_ecu/sim_trans, unit tests
+research/               # CP + packing reverse-engineering writeups (incl. CerberusCAN plan)
+docs/                   # flash layouts, ODX findings, Simos8.5 tuning guide, Pages site
+```
+
+---
+
+## Testing
+
+```bash
+python -m tests              # run all suites (smoke + checksums + ECU + trans + VIN)
+python -m tests --headless   # skip GUI simulation (backend only)
+python -m tests --ecu SC8    # use Simos18 for the sim tests
+python -m tests -v           # verbose
+```
+
+The harness (`tests/sim_runner.py`) patches the connection layer to a
+`MockConnection` so the full GUI and backend run with no hardware. Individual
+modules also have unit tests (`test_checksums`, `test_frf_pack`, `test_sgo_pack`,
+`test_sgo_unpack`, `test_module_db`, `test_module_scan`, `test_hvac_flash`,
+`test_vin_utils`).
 
 ---
 
@@ -146,90 +365,84 @@ it to GitHub Releases automatically.
 
 | Key | ECU | Engine | Platform |
 |-----|-----|--------|----------|
-| S85 | Simos8.5 | 3.0T TFSI CGWA/B (C7 A6/A7) | PQ46 — **primary target** |
-| SC1 | Simos12 | 2.0T EA888 Gen1/2 | PQ46 |
-| SC2 | Simos12.2 | 2.0T EA888 Gen3 | PQ46 |
-| SC8 | Simos18.1/6 | 2.0T EA888 Gen3b | MQB |
-| SC8_TTRS | Simos18.1 | **2.5T EA855 TTRS/TT** | MQB — **NEW** |
-| SCG | Simos18.10 | 2.0T EA888 Gen3b Evo | MQB Evo — **NEW** |
+| `S85` | Simos8.5 | 3.0T TFSI CGWA/B (C7 A6/A7) | **primary target** |
+| `SC1` | Simos12 | 2.0T EA888 Gen1/2 | PQ46 |
+| `SC2` | Simos12.2 | 2.0T EA888 Gen3 | PQ46 |
+| `SC8` | Simos18.1 | 2.0T EA888 Gen3b | MQB |
+| `SC8_TTRS` | Simos18.1 | 2.5T EA855 (TTRS/TT) | MQB |
+| `SCG` | Simos18.10 | 2.0T EA888 Gen3b Evo | MQB Evo |
 
 | Key | TCU | Gearbox |
 |-----|-----|---------|
-| ZF8HP | Bosch | ZF 8-speed auto (C7 A6/A7/A8 D4) |
-| DL501 | Mechatronic | S-Tronic 7-speed DSG (C7 S6/S7) |
-| DQ250 | Temic | 6-speed wet DSG (MQB Golf 7/Passat B8) |
-| DQ381 | Bosch | 7-speed dry DSG (MQB Golf 8) |
+| `ZF8HP` | ZF 8-speed auto (C7 A6/A7/A8 D4) |
+| `DL501` | S-Tronic 7-speed DSG (C7 S6/S7) |
+| `DQ250` | 6-speed wet DSG (MQB) |
+| `DQ381` | 7-speed dry DSG (MQB) |
+
+ECU/TCU definitions (SA2 scripts, block layouts, CAN IDs, crypto keys/IVs) and the
+J533 gateway / J255 HVAC entries live in `core/ecu_defs.py`. The 36-module C7
+firmware inventory (arch / supplier / data-format / signing / SA2 / flash-profile /
+CP-patch status) is in `data/c7_module_db.json`.
 
 ---
 
-## Component Protection (Track A)
+## Status & honesty
 
-CP research is documented in [VAG-CP-Docs](https://github.com/dspl1236/VAG-CP-Docs).
+| Area | Maturity |
+|------|----------|
+| ECU Info / VIN read · Logger · Trans live data · bus scan · DTC read+clear | **mature** |
+| Raw CAN sniff + ISO-TP/UDS decode + PCAP export | **mature** |
+| FRF decode · SGO unpack/repack (byte-exact) · LZSS · checksums | **mature** |
+| Virtual block read (RequestUpload) + decrypt/decompress | working |
+| **ECU/TCU flash WRITE** | **implemented, GUI-disabled** pending hardware validation |
+| FRF repack · payload codec · BCB compress | new / functional (CLI-only) |
+| J533 gateway CP cipher model | **proven** (known-answer test closed) |
+| HVAC IKA handshake model | **modeled** — bit-exactness bench-pending |
+| CP IKA-key write · J533 constellation update · CP routine | **experimental** — unconfirmed on hardware |
+| HVAC CP-patch flasher · BDM ingest | **bench-gated** (dry-run default) |
+| CerberusCAN integration | **plan only** — no code in repo |
 
-**What is confirmed** (from AU57X ODIS MCD project + `ES_LIBCompoProteGen3V12.sd.db`):
-
-| Item | Value | Status |
-|------|-------|--------|
-| Constellation DID | `0x04A3` | ✅ Confirmed |
-| Sub-DIDs (presence, sleep, DTC, TP-ID) | `0x2A26`–`0x2A2C` | ✅ Confirmed |
-| IKA key DID (J533 + J255) | `0x00BE` — 34 bytes | ✅ Confirmed |
-| GKA key DID (J255 only) | `0x00BD` — 34 bytes | ✅ Confirmed |
-| Security access for CP writes | None — extended session only | ✅ Confirmed |
-| J255 ECU name code | `8` (Air Conditioning) | ✅ Confirmed |
-| CP routine ID | **`0x0226`** (`31 01 02 26`) | ⏳ Pending hardware confirmation |
-
-**To confirm `0x0226` on your car:**
-
-```python
-from cp_tools.j533_probe import J533Probe
-probe = J533Probe(interface="BLE")
-probe.connect()
-resp = probe.start_cp_routine()
-print(resp.hex() if resp else "no response")
-# 0x7F 31 22 → conditions not correct = ID accepted, GEKO token required ✅
-# 0x7F 31 31 → request out of range = wrong ID ❌
-```
-
-Once confirmed:
-```bash
-python -m cp_tools.mwb_extract --confirm 0x0226
-```
+**On Component Protection.** This is a right-to-repair effort on the author's own
+car — e.g. re-authorizing a used HVAC module you already own without a dealer's live
+server session. The CP tooling reads owner-writable records, models
+locally-checked symmetric ciphers, and patches firmware on the author's own bench
+hardware. **It does not defeat cryptographic signatures.** Several modules
+(BCM2, the J533 gateway code blocks) are RSA/AES-signed and are **not** flashable
+or extractable with this suite — signatures are a wall, and this README does not
+claim otherwise. Anything unconfirmed is labeled unconfirmed. Bench reports and
+corrections are welcome.
 
 ---
 
-## Roadmap
+## research/
 
-- [x] Phase 1 — Foundation (ECU defs, UDS flash, BLE transport, J533 probe, ODX parser)
-- [x] Phase 2 — Full 8-tab GUI, trans live data, sim harness
-- [x] Phase 3 — CP routine ID extracted (`0x0226`), logger wired, EXE build, passive CAN sniffer
-- [ ] Phase 4 — CP hardware confirmation + full auth sequence
-- [ ] Phase 5 — Android APK (Kotlin BLE client)
-- [ ] Tune tab — Simos8.5 calibration editor (14 tables, RPM/load axes, heat-map, 2D chart for 1×N tables, lean diagnosis, checksum fix + save) — *not yet shipped*
-
----
-
-## Dependencies
-
-```
-udsoncan >= 1.21      # UDS protocol
-bleak >= 0.21         # BLE transport
-pyserial >= 3.5       # USB bridge
-numpy >= 1.24         # CAL table math
-pycryptodome >= 3.18  # AES for Simos12/18
-python-can >= 4.0     # SocketCAN
-sa2_seed_key          # pip install git+https://github.com/bri3d/sa2_seed_key.git
-```
+The `research/` directory holds the CP + container-packing reverse-engineering
+writeups behind these tools: C7 CP parts inventory, firmware RE deep-dives,
+seat/HVAC IKA verdicts, BIN→FRF/SGO packing notes, BDM read targets, the
+CerberusCAN bench/emulation plan, and ECU-swap / zero-constellation test
+protocols. `docs/` adds per-module flash layouts, ODX findings, and a Simos8.5
+tuning guide. Full CP documentation lives in
+[VAG-CP-Docs](https://github.com/dspl1236/VAG-CP-Docs).
 
 ---
 
 ## Credits
 
-- [bri3d/VW_Flash](https://github.com/bri3d/VW_Flash) — foundational reverse engineering
-- [Switchleg1/esp32-isotp-ble-bridge](https://github.com/Switchleg1/esp32-isotp-ble-bridge) — ESP32 firmware
-- [bri3d/sa2_seed_key](https://github.com/bri3d/sa2_seed_key) — SA2 bytecode interpreter
-- [peterGraf/pbl](https://github.com/peterGraf/pbl) — PBL B-tree library (used for `.sd.db` extraction)
-- [VAG-CP-Docs](https://github.com/dspl1236/VAG-CP-Docs) — CP research documentation
+- [bri3d/VW_Flash](https://github.com/bri3d/VW_Flash) — foundational VAG flash
+  reverse engineering; the `data/frf.key` rolling-XOR key and much of the
+  Simos understanding derive from this work.
+- [bri3d/sa2_seed_key](https://github.com/bri3d/sa2_seed_key) — SA2 seed/key
+  bytecode interpreter.
+- [Switchleg1/esp32-isotp-ble-bridge](https://github.com/Switchleg1/esp32-isotp-ble-bridge) — ESP32 ISO-TP bridge firmware lineage.
+- [peterGraf/pbl](https://github.com/peterGraf/pbl) — PBL B-tree library (used for
+  ODIS `.sd.db` extraction).
+- [VAG-CP-Docs](https://github.com/dspl1236/VAG-CP-Docs) — CP research documentation.
+
+## License
+
+**GPL-3.0.** Free for personal use and right-to-repair. Any modified version must
+also be open source. See [LICENSE](LICENSE). No warranty (GPL §15–16).
 
 ---
 
-*Built for owners. GPL v3. github.com/dspl1236/simos-suite*
+*Built for owners. GPL-3.0. github.com/dspl1236/simos-suite*
