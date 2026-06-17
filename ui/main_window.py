@@ -4491,6 +4491,179 @@ class CPLabTab(_Tab):
         self._run(work)
 
 
+class CPCaptureTab(_Tab):
+    """Live CerberusCAN passive capture + ISO-TP / VW TP 2.0 decode (CP handshake)."""
+
+    def __init__(self, parent, mw):
+        super().__init__(parent, mw)
+        self._dev = None
+        self._frames = []
+        self._stop = None
+        self._n = 0
+        self._cur_bus = 1
+
+        _section(self, "CerberusCAN capture  (passive sniff)")
+        bar = _frame(self)
+        bar.pack(fill="x", padx=14, pady=(2, 4))
+        tk.Label(bar, text="port", fg=C["muted"], bg=C["bg"],
+                 font=("Menlo", 10)).pack(side="left")
+        self._port = tk.StringVar()
+        self._port_cb = ttk.Combobox(bar, textvariable=self._port, width=12,
+                                     font=("Menlo", 10))
+        self._port_cb.pack(side="left", padx=(4, 8))
+        tk.Label(bar, text="bus", fg=C["muted"], bg=C["bg"],
+                 font=("Menlo", 10)).pack(side="left")
+        self._bus = tk.StringVar(value="1 (500k diag)")
+        ttk.Combobox(bar, textvariable=self._bus, state="readonly", width=15,
+                     values=["1 (500k diag)", "2 (100k comfort)"],
+                     font=("Menlo", 10)).pack(side="left", padx=(4, 8))
+        _btn(bar, "Detect", self._detect).pack(side="left")
+
+        b2 = _frame(self)
+        b2.pack(fill="x", padx=14, pady=(0, 4))
+        _btn(b2, "Start sniff", self._start, primary=True).pack(side="left")
+        _btn(b2, "Stop", self._stop_capture).pack(side="left", padx=6)
+        _btn(b2, "Save CSV…", self._save).pack(side="left")
+        _btn(b2, "Decode", self._decode, primary=True).pack(side="left", padx=6)
+
+        self._status = tk.Label(self, text="idle", fg=C["dim"], bg=C["bg"],
+                                font=("Menlo", 10), anchor="w")
+        self._status.pack(fill="x", padx=14)
+        self._log = _log_widget(self, height=15)
+        self._append_log(
+            self._log,
+            "Passive capture via CerberusCAN, then ISO-TP + VW TP 2.0 decode.\n"
+            "Bus 1 (500k, OBD 6/14) sees ALL ODIS diagnostics incl. gateway-routed\n"
+            "comfort modules. Run during an ODIS CP session -> Stop -> Decode, and the\n"
+            "TrainICA / 0x00BE / SecurityAccess get flagged.\n\n", "dim")
+        self._detect()
+
+    def _set_status(self, text, color):
+        self._status.config(text=text, fg=color)
+
+    def _detect(self):
+        try:
+            from transport.cerberus_serial import detect_ports
+            ports = [p for _l, p in detect_ports()]
+        except Exception:
+            ports = []
+        self._port_cb["values"] = ports
+        if ports and not self._port.get():
+            self._port.set(ports[0])
+        self._append_log(self._log, "ports: %s\n" % (", ".join(ports) or "none detected"), "dim")
+
+    def _poll(self):
+        if self._dev is not None:
+            self._set_status("capturing bus %d — %d frames" % (self._cur_bus, self._n), C["green"])
+            self.after(300, self._poll)
+
+    def _start(self):
+        if self._dev is not None:
+            self._append_log(self._log, "already capturing.\n", "warn")
+            return
+        port = self._port.get().strip()
+        if not port:
+            self._append_log(self._log, "pick a port first (Detect).\n", "warn")
+            return
+        import threading
+        self._cur_bus = 1 if self._bus.get().startswith("1") else 2
+        self._frames = []
+        self._n = 0
+        self._stop = threading.Event()
+
+        def on_frame(t, cid, data):
+            self._n += 1
+
+        def work():
+            try:
+                from transport.cerberus_serial import Cerberus
+                self._dev = Cerberus(port)
+                if not self._dev.ping():
+                    self._ui(self._append_log, self._log,
+                             "no PONG (check port/firmware) — capturing anyway\n", "warn")
+                self._ui(self._poll)
+                frames = self._dev.sniff(bus=self._cur_bus, ms=0,
+                                         on_frame=on_frame, stop=self._stop.is_set)
+                self._frames = frames
+                self._ui(self._append_log, self._log,
+                         "captured %d frames.\n" % len(frames), "ok")
+            except Exception as ex:
+                self._ui(self._append_log, self._log, "capture error: %s\n" % ex, "err")
+            finally:
+                try:
+                    if self._dev:
+                        self._dev.close()
+                except Exception:
+                    pass
+                self._dev = None
+                self._ui(self._set_status, "idle (%d frames)" % len(self._frames), C["dim"])
+
+        self._append_log(self._log,
+                         "starting capture on %s bus %d — trigger your event…\n"
+                         % (port, self._cur_bus), "hdr")
+        self._run(work)
+
+    def _stop_capture(self):
+        if self._stop is not None:
+            self._stop.set()
+            self._append_log(self._log, "stop requested…\n", "dim")
+        else:
+            self._append_log(self._log, "not capturing.\n", "warn")
+
+    def _save(self):
+        from tkinter import filedialog
+        if not self._frames:
+            self._append_log(self._log, "nothing captured yet.\n", "warn")
+            return
+        out = filedialog.asksaveasfilename(title="Save capture CSV", defaultextension=".csv",
+                                           filetypes=[("CSV", "*.csv")])
+        if not out:
+            return
+        try:
+            with open(out, "w") as f:
+                f.write("ms,id,data\n")
+                for t, cid, data in self._frames:
+                    f.write("%d,%X,%s\n" % (t, cid, data.hex().upper()))
+            self._append_log(self._log, "saved %d frames -> %s\n" % (len(self._frames), out), "ok")
+        except Exception as ex:
+            self._append_log(self._log, "save error: %s\n" % ex, "err")
+
+    def _decode(self):
+        if not self._frames:
+            self._append_log(self._log, "nothing captured yet.\n", "warn")
+            return
+
+        def work():
+            try:
+                from cp_tools.can_decode import decode_frames, ascii_of
+                msgs = decode_frames(self._frames)
+                self._ui(self._clear_log, self._log)
+                self._ui(self._append_log, self._log,
+                         "decoded %d UDS/KWP message(s)\n\n" % len(msgs), "hdr")
+                cp = []
+                for m in msgs:
+                    asc = ascii_of(m.payload) if any(32 <= c < 127 for c in m.payload) else ""
+                    tag = "ok" if m.cp else None
+                    self._ui(self._append_log, self._log,
+                             "%8d %s %-5s %-40s %s\n"
+                             % (m.t, "%03X" % m.can_id, m.transport, m.label, asc[:28]), tag)
+                    if m.cp:
+                        cp.append(m)
+                if cp:
+                    self._ui(self._append_log, self._log,
+                             "\n=== %d CP-relevant ===\n" % len(cp), "hdr")
+                    for m in cp:
+                        self._ui(self._append_log, self._log,
+                                 "  %03X %-22s %s\n" % (m.can_id, m.cp, m.payload.hex()), "err")
+                else:
+                    self._ui(self._append_log, self._log,
+                             "\n(no CP-relevant services — reads/scan only)\n", "dim")
+            except Exception as ex:
+                self._ui(self._append_log, self._log, "decode error: %s\n" % ex, "err")
+
+        self._run(work)
+
+
 class MainWindow(tk.Tk):
     """
     Root application window.
@@ -4621,6 +4794,7 @@ class MainWindow(tk.Tk):
             ("  logger  ",      LoggerTab),
             ("  cp tools  ",    CPToolsTab),
             ("  cp lab  ",      CPLabTab),
+            ("  cp capture  ",  CPCaptureTab),
             ("  raw sniff  ",   RawSniffTab),
             ("  diagnostics",   DiagTab),
             ("  trans  ",         TransLoggerTab),
