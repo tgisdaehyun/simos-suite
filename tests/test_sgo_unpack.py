@@ -45,6 +45,15 @@ class TestBCB(unittest.TestCase):
         self.assertEqual(_shortest_period(b"GEHEIMGEHEIM"), b"GEHEIM")
         self.assertEqual(_shortest_period(b"ABCD"), b"ABCD")
 
+    def test_shortest_period_byte_aligned(self):
+        # regression: byte keys whose hex repeat-search could land on an odd
+        # index used to crash unhexlify. Period must be byte-aligned + correct.
+        for key in (b"\x21\x12", b"\x12\x21\x12", bytes(range(7)),
+                    b"GEHEIM" * 3, bytes([1, 2]) * 5, b"\xff\x00\xff"):
+            p = _shortest_period(key)
+            self.assertEqual(len(key) % len(p), 0)
+            self.assertEqual(p * (len(key) // len(p)), key)
+
 
 class TestDecodeBlock(unittest.TestCase):
     def test_known_key(self):
@@ -72,11 +81,27 @@ class TestDecodeBlock(unittest.TestCase):
         self.assertEqual(mode, Crypto.BCB)
 
     def test_aes_flagged(self):
-        os.urandom  # noqa
         blob = bytes((i * 167 + 13) % 256 for i in range(0x4000))  # 16-aligned, high entropy
         data, mode, key, note = _decode_block(blob, 0x4000)
         self.assertEqual(mode, Crypto.AES)
         self.assertEqual(data, b"")
+
+    def test_aes_small_block(self):
+        # 128-byte encrypted block tops out near 7 bits/byte but must still be
+        # flagged AES (entropy normalised to block size, not a flat 7.5 cutoff).
+        blob = bytes((i * 167 + 13) % 256 for i in range(128))
+        data, mode, key, note = _decode_block(blob, 128)
+        self.assertEqual(mode, Crypto.AES)
+
+    def test_empty_bcb_not_accepted(self):
+        # a 1A01 header followed by an immediate end-token (checksum 0) decodes to
+        # b"" — must NOT be accepted as a bcb decode (the size guard rejects it,
+        # otherwise sum(b"")==0 trivially matches and yields a false bcb-xor hit).
+        end_tok = struct.pack(">H", 0x3 << 14) + b"\x00\x00\x00"
+        x = b"\x00" * 8 + b"\x1A\x01" + end_tok + bytes(0x4000)
+        blob = _xor(x, b"\xFF")
+        data, mode, key, note = _decode_block(blob, 0x4000)
+        self.assertNotIn(mode, (Crypto.BCB, Crypto.BCB_XOR))
 
     def test_plain(self):
         blob = _xor(b"\x00" * 512, b"\xFF")        # low entropy, no BCB header

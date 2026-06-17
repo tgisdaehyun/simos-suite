@@ -27,7 +27,6 @@ Part of Simos-Suite (GPL-3.0).
 from __future__ import annotations
 
 import argparse
-import binascii
 import collections
 import math
 import os
@@ -140,19 +139,34 @@ def _bcb_decompress(stream: bytes) -> Tuple[Optional[bytes], Optional[int]]:
         flag 0 = literal (copy len bytes)
         flag 1 = RLE   (repeat next byte len times)
         flag 3 = end   (followed by a 24-bit checksum of the output)
-    Returns (output, end_checksum) or (None, None) on a malformed stream."""
+    Returns (output, end_checksum) or (None, None) on a malformed stream.
+
+    KNOWN GAP: this u16/2-bit-flag token model does NOT match VW's real on-disk
+    crypt=0x10 BCB streams, which use a different 1A-escape token scheme (e.g.
+    recurring 1A 04 04 / 1A 06 06). No surveyed real .sgo block decodes through
+    here — real crypt=0x10 blocks currently fall to the plain/AES branch in
+    _decode_block. cp_tools.bcb_compress is the exact inverse of THIS function
+    (round-trips through it), but is likewise not VW-format. Reversing the real
+    1A-escape codec is open work; until then crypt=0x10 packing is not
+    flash-accurate (prefer the plain crypt=0x00 path)."""
     p, out = 0, bytearray()
     while p + 2 <= len(stream):
         tok = struct.unpack_from(">H", stream, p)[0]
         p += 2
         flag, ln = tok >> 14, tok & 0x3FFF
-        if flag == 0:
+        if flag == 0:                          # literal
+            if p + ln > len(stream):
+                return None, None
             out += stream[p:p + ln]
             p += ln
-        elif flag == 1:
+        elif flag == 1:                        # RLE
+            if p >= len(stream):
+                return None, None
             out += bytes([stream[p]]) * ln
             p += 1
-        elif flag == 3:
+        elif flag == 3:                        # end + 24-bit checksum
+            if p + 3 > len(stream):
+                return None, None
             return bytes(out), _w24(stream, p)
         else:
             return None, None
@@ -160,9 +174,12 @@ def _bcb_decompress(stream: bytes) -> Tuple[Optional[bytes], Optional[int]]:
 
 
 def _shortest_period(key: bytes) -> bytes:
-    h = binascii.hexlify(key)
-    i = (h + h).find(h, 1, -1)
-    return key if i == -1 else binascii.unhexlify(h[:i])
+    """Reduce a repeating key to its fundamental period (operating on bytes, so
+    the boundary is always byte-aligned)."""
+    if not key:
+        return key
+    d = (key + key).find(key, 1, -1)
+    return key if d == -1 else key[:d]
 
 
 def _crack_xor_key(stream: bytes, target: int, klen: int) -> bytes:
@@ -172,9 +189,9 @@ def _crack_xor_key(stream: bytes, target: int, klen: int) -> bytes:
     return bytes(cols[p].most_common(1)[0][0] ^ target for p in range(klen))
 
 
-def _decode_bcb_block(x: bytes) -> Optional[Tuple[bytes, Crypto, bytes]]:
+def _decode_bcb_block(x: bytes, declen: int) -> Optional[Tuple[bytes, Crypto, bytes]]:
     """Given the 0xFF-XOR'd block (with a `1A 01` BCB header), return
-    (data, mode, key) with the decode checksum-verified, or None."""
+    (data, mode, key) with the decode size- and checksum-verified, or None."""
     i = x.find(b"\x1A\x01")
     if i < 0:
         return None
@@ -182,7 +199,12 @@ def _decode_bcb_block(x: bytes) -> Optional[Tuple[bytes, Crypto, bytes]]:
 
     def verify(stream: bytes) -> Optional[bytes]:
         out, chk = _bcb_decompress(stream)
-        if out is not None and chk is not None and (sum(out) & 0xFFFFFF) == chk:
+        # require a non-empty decode of the expected size (declen is end-start, so
+        # the real length is declen or declen+1) AND a matching 24-bit checksum.
+        # Without the size/non-empty guard, an empty decode trivially passes the
+        # checksum (sum(b"") == 0) and yields a false "bcb-xor" hit over AES.
+        if (out and chk is not None and len(out) in (declen, declen + 1)
+                and (sum(out) & 0xFFFFFF) == chk):
             return out
         return None
 
@@ -208,14 +230,19 @@ def _decode_bcb_block(x: bytes) -> Optional[Tuple[bytes, Crypto, bytes]]:
 def _decode_block(blob: bytes, declen: int) -> Tuple[bytes, Crypto, bytes, str]:
     """Decode one raw block blob. Returns (data, mode, key, note)."""
     x = _xor(blob, b"\xFF")
-    bcb = _decode_bcb_block(x)
+    bcb = _decode_bcb_block(x, declen)
     if bcb is not None:
         data, mode, key = bcb
         note = "key=%r" % key.decode("latin1") if key else "no-key"
         return data, mode, key, note + " csum-OK"
-    # no BCB header: AES vs plain
-    if declen % 16 == 0 and len(blob) == declen and _entropy(x[:8192]) > 7.5:
-        return b"", Crypto.AES, b"", "AES-encrypted (key required)"
+    # no BCB header: AES-encrypted vs genuinely plain. Normalise entropy to the
+    # block-size ceiling so small encrypted blocks (e.g. 128-byte EEPROM pages,
+    # which top out near 7 bits/byte even when encrypted) are still detected.
+    if declen % 16 == 0 and len(blob) == declen:
+        sample = x[:8192]
+        ceil = math.log2(min(256, max(2, len(sample))))
+        if _entropy(sample) / ceil > 0.88:
+            return b"", Crypto.AES, b"", "AES-encrypted (key required)"
     return x, Crypto.PLAIN, b"", "plain"
 
 

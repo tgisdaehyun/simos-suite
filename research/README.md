@@ -9,6 +9,14 @@ VAG-CP-Docs advocacy repository.
 
 | File | Description |
 |------|-------------|
+| `c7-cp-parts-inventory.md`         | **Full C7 Component-Protection parts inventory** — every module classified true-CP / IMMO / present-not-CP, with part numbers, flashdaten availability + crypto (extractable vs bench-only) |
+| `cp-firmware-re-deepdive.md`       | **End-to-end RE of 3 CP firmwares** (BCM1 J519 V850, Driver Seat J136 ARM/V850, Sound2 amp J525 NEC) — memory map, crypto, the 0x00BE IKA handler + CP-verify + CP-DTC/lock mechanism per module |
+| `seat-ika-cp-verdict.md`           | **Seat J136 IKA lifecycle + verdict** — the CP credential is a LOCAL symmetric-AES known-answer test (not GeKo/RSA/server-locked); write path open; no-patch local CP hinges only on `challenge=f(CS)?` |
+| `cerberuscan-cp-bench-plan.md`     | **Turnkey bench/emulation plan** — CerberusCAN on the Convenience CAN to emulate a module, capture one CP handshake, recover the challenge + confirm `f(CS)`; pulls the MIT UDS-responder stack (iso14229 + isotp-c + FlexCAN_T4) |
+| `bin-to-frf-sgo-packing.md`        | **BIN → FRF/ODX/SGO packing** (AARK-Kommander-style) — reverse the decode pipelines into validated packers (`flasher/frf_pack`, `flasher/payload_codec`, `cp_tools/sgo_pack`); SGO 69/69 byte-exact, FRF functional w/ CRC32 recompute; payload-codec matrix (RAW/Simos-XOR/Bosch-LZSS-AES); module-side acceptance (checksum vs RSA/AES wall); fixes the VW-incompatible `lzss_compress` |
+| `bcm2-4h0907064.md`                | BCM2 4H0907064 module doc (AES-locked flashware; SA2 decoded; bench-dump targets) |
+| `bdm-read-targets.md`              | HVAC J255 bench BDM read target list (block0 cipher tables + IKA + CS) |
+| `flashdaten_extraction.md`         | FRF/SGO flashdaten extraction notes |
 | `zero-constellation-experiment.md` | Spare C7 test: does zeroing DID 0x04A3 disable CP enforcement? |
 | `ika-key-derivation-analysis.md`   | Scenario A/B/C analysis once hardware test results are in |
 | `ecu-swap-test-protocol.md`        | Structured protocol for documenting ECU swap CP behaviour |
