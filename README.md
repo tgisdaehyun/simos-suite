@@ -147,8 +147,10 @@ if you trust it, or run from source (see [Install](#install)).
 
 - Single **Tkinter** app (`ui/main_window.py`, **v0.3.3**), dark "macOS terminal"
   theme, pure stdlib — no Qt, no web.
-- One `ttk.Notebook` with **8 tabs**: Connect · ECU Info · Flash · Logger ·
-  CP Tools · Raw Sniff · Diagnostics · Trans.
+- One `ttk.Notebook` with **11 tabs**: Connect · Vehicle · ECU Info · Flash ·
+  Flashware · Logger · CP Tools · CP Lab · Raw Sniff · Diagnostics · Trans.
+  (Vehicle = live bus scan + module DB; Flashware = offline FRF/SGO repack;
+  CP Lab = offline gateway/HVAC CP-cipher bench.)
 - Ships as one unsigned Windows x64 EXE and runs the **whole GUI with no hardware**
   via the built-in Simos8.5 simulator.
 
@@ -161,10 +163,11 @@ if you trust it, or run from source (see [Install](#install)).
   Windows-registry (`PassThruSupport.04.04`) auto-detect and a cable probe.
 - **Linux SocketCAN** (`SocketCAN_<iface>`).
 - **MOCK / DEMO** virtual Simos8.5.
-- **CerberusCAN** (a user-built Teensy 4.x tri-CAN OBD tool): **planned, not yet
-  integrated** — there is *no* Cerberus code in this repo (firmware, driver, or GUI
-  option). It is referenced only in `research/cerberuscan-cp-bench-plan.md`. See
-  [Connections](#connections) for the intended seam.
+- **CerberusCAN** (a user-built Teensy 4.x tri-CAN OBD tool): a first-class
+  **`CERBERUS`** interface — host connection + auto-detect + Connect-tab selector.
+  The ISO-TP path works; the Convenience-CAN (VW TP 2.0) capture it targets is still
+  scaffolding, and the board firmware lives outside this repo. See
+  [Connections](#connections).
 
 ---
 
@@ -295,6 +298,7 @@ manual-override combobox. Internally everything dispatches through
 |-----------|-----|-------|
 | ESP32 BLE bridge | `BLE` | Scan by GATT UUID `0xABF0`, `0xF1` framing. Flag `0x10` routes to Convenience CAN (MCP2515). |
 | ESP32 USB bridge | `USBISOTP` | Same hardware over USB serial @250000. Auto-detected by VID/PID (CP2102 / CH340 / ESP32-S3). |
+| CerberusCAN tri-CAN | `CERBERUS` | Teensy 4.x (PJRC VID `0x16C0`). Reuses the `0xF1` ISO-TP framing + a FlexCAN channel select. ISO-TP works; comfort-bus VW TP 2.0 is scaffolding. |
 | ESP32 WiFi (FunkBridge) | `WIFI` | WebSocket transport, same framing, auto URL detect. |
 | J2534 PassThru | `J2534` | Tactrix / Mongoose / VNCI / SL1. Path-list + registry auto-detect, probed with PassThruOpen. |
 | Linux SocketCAN | `SocketCAN_<iface>` | Linux only (`iso-tp` kernel module). |
@@ -305,20 +309,22 @@ manual-override combobox. Internally everything dispatches through
 > fail in the EXE with `WinError 193` — run those from a 32-bit Python
 > (`python -m ui`). For the EXE, use the ESP32 bridge (BLE/USB) or a 64-bit shim.
 
-### CerberusCAN status — *planned, not integrated*
+### CerberusCAN status — *bridge present; comfort-bus is scaffolding*
 
 CerberusCAN is a user-built **Teensy 4.x** board with 3× FlexCAN channels intended
 to sit on the C7 Convenience CAN (100 kbps, pins 3+11) and run a UDS-responder /
-sniffer stack for CP bench experiments. **There is no Cerberus code in this repo**
-— no connection class, no serial handler, no GUI option. Only
-`research/cerberuscan-cp-bench-plan.md` describes it. The comfort bus also needs a
-custom VW TP 2.0 transport that does not exist here yet.
+sniffer stack for CP bench experiments.
 
-The natural drop-in seam is the existing **USB-ISOTP framing**
-(`lib/connections/usb_isotp_connection.py`: `b"\xF1"` + cmd + rxid + txid + size +
-payload @250000 baud). A Cerberus that emits this exact framing would appear as a
-`USBISOTP` interface with near-zero Python changes (its PJRC/Teensy VID `0x16C0`
-would just need adding to the USB auto-detect).
+**Wired (host side):** `transport/cerberus_bridge.py` (`CerberusConnection`, reusing
+the ESP32 `0xF1` ISO-TP framing + a FlexCAN channel select), a `CERBERUS` branch in
+`flasher/uds_flash._make_connection`, registry auto-detect by the PJRC/Teensy VID
+`0x16C0`, and a `CERBERUS` entry in the Connect-tab selector. A Cerberus that speaks
+that framing drops in as an interface and the ISO-TP path works.
+
+**Not done:** the Convenience-CAN capture this board ultimately targets needs a
+**VW TP 2.0** transport that does not exist in this repo yet, and the **CerberusCAN
+firmware lives outside this repo**. So comfort-bus CP capture and the tri-CAN raw
+sniffer are honest scaffolding — see `research/cerberuscan-cp-bench-plan.md`.
 
 ---
 
@@ -395,12 +401,14 @@ CP-patch status) is in `data/c7_module_db.json`.
 | FRF decode · SGO unpack/repack (byte-exact) · LZSS · checksums | **mature** |
 | Virtual block read (RequestUpload) + decrypt/decompress | working |
 | **ECU/TCU flash WRITE** | **implemented, GUI-disabled** pending hardware validation |
-| FRF repack · payload codec · BCB compress | new / functional (CLI-only) |
+| FRF repack · payload codec · BCB compress | new / functional |
+| GUI: Vehicle · Flashware · CP Lab tabs | new — surface the offline tools in the GUI |
 | J533 gateway CP cipher model | **proven** (known-answer test closed) |
 | HVAC IKA handshake model | **modeled** — bit-exactness bench-pending |
 | CP IKA-key write · J533 constellation update · CP routine | **experimental** — unconfirmed on hardware |
 | HVAC CP-patch flasher · BDM ingest | **bench-gated** (dry-run default) |
-| CerberusCAN integration | **plan only** — no code in repo |
+| CerberusCAN bridge (ISO-TP) | **wired** — connection + auto-detect + selector |
+| CerberusCAN comfort-bus capture / tri-CAN sniffer | **scaffolding** — needs VW TP 2.0 + firmware |
 
 **On Component Protection.** This is a right-to-repair effort on the author's own
 car — e.g. re-authorizing a used HVAC module you already own without a dealer's live
