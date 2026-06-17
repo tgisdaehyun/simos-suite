@@ -43,8 +43,14 @@ NRC = {0x11: "serviceNotSupported", 0x12: "subFuncNotSupported", 0x13: "wrongLen
        0x33: "securityAccessDenied", 0x35: "invalidKey", 0x36: "exceedAttempts",
        0x78: "responsePending", 0x7F: "serviceNotSupportedInSession"}
 
-# CAN IDs / payload shapes that matter for Component Protection.
-Msg = namedtuple("Msg", "t can_id transport payload label cp")
+try:
+    from core.can_ids import module_for
+except Exception:                       # pragma: no cover
+    def module_for(_cid):
+        return None
+
+# A reassembled UDS/KWP message. `module` = short module name for the CAN id (or None).
+Msg = namedtuple("Msg", "t can_id transport payload label cp module")
 
 
 def ascii_of(b: bytes) -> str:
@@ -164,7 +170,7 @@ def decode_frames(frames, skip_tester_present=True):
             if skip_tester_present and m[:1] in (b"\x3E", b"\x7E"):
                 continue
             lab, cp = label(m)
-            out.append(Msg(t, cid, tp, m, lab, cp))
+            out.append(Msg(t, cid, tp, m, lab, cp, module_for(cid)))
     out.sort(key=lambda x: x.t)
     return out
 
@@ -195,20 +201,22 @@ def _main():
     if tp:
         print("VW TP 2.0 channel IDs: %s" % ", ".join("0x%03X" % i for i in sorted(tp)))
     msgs = decode_frames(frames)
-    print("\n%-9s %-5s %-5s  %-46s %s" % ("ms", "id", "tp", "decoded", "ascii"))
-    print("-" * 100)
+    print("\n%-9s %-16s %-5s  %-42s %s" % ("ms", "id  module", "tp", "decoded", "ascii"))
+    print("-" * 104)
     cp_hits = []
     for m in msgs:
         asc = ascii_of(m.payload) if any(32 <= c < 127 for c in m.payload) else ""
         flag = ("  <<<<< " + m.cp) if m.cp else ""
-        print("%-9d %-5s %-5s  %-46s %s%s" % (m.t, "%03X" % m.can_id, m.transport,
-                                              m.label, asc[:36], flag))
+        idmod = "%03X %s" % (m.can_id, m.module or "")
+        print("%-9d %-16s %-5s  %-42s %s%s" % (m.t, idmod, m.transport,
+                                               m.label, asc[:32], flag))
         if m.cp:
             cp_hits.append(m)
     if cp_hits:
         print("\n=== %d Component-Protection-relevant message(s) ===" % len(cp_hits))
         for m in cp_hits:
-            print("  %8d ms  %03X  %-22s  %s" % (m.t, m.can_id, m.cp, m.payload.hex()))
+            print("  %8d ms  %03X %-16s %-22s  %s"
+                  % (m.t, m.can_id, m.module or "", m.cp, m.payload.hex()))
     else:
         print("\n(no CP-relevant services in this capture — reads/scan only)")
 

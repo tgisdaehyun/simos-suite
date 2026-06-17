@@ -4645,8 +4645,8 @@ class CPCaptureTab(_Tab):
                     asc = ascii_of(m.payload) if any(32 <= c < 127 for c in m.payload) else ""
                     tag = "ok" if m.cp else None
                     self._ui(self._append_log, self._log,
-                             "%8d %s %-5s %-40s %s\n"
-                             % (m.t, "%03X" % m.can_id, m.transport, m.label, asc[:28]), tag)
+                             "%8d %03X %-12s %-5s %-32s %s\n"
+                             % (m.t, m.can_id, (m.module or ""), m.transport, m.label, asc[:22]), tag)
                     if m.cp:
                         cp.append(m)
                 if cp:
@@ -4654,7 +4654,8 @@ class CPCaptureTab(_Tab):
                              "\n=== %d CP-relevant ===\n" % len(cp), "hdr")
                     for m in cp:
                         self._ui(self._append_log, self._log,
-                                 "  %03X %-22s %s\n" % (m.can_id, m.cp, m.payload.hex()), "err")
+                                 "  %03X %-12s %-20s %s\n"
+                                 % (m.can_id, (m.module or ""), m.cp, m.payload.hex()), "err")
                 else:
                     self._ui(self._append_log, self._log,
                              "\n(no CP-relevant services — reads/scan only)\n", "dim")

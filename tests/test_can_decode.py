@@ -73,5 +73,17 @@ class TestCorpus(unittest.TestCase):
         self.assertEqual([m.label for m in msgs if m.cp], [])
 
 
+class TestCanIds(unittest.TestCase):
+    def test_known_ids(self):
+        from core.can_ids import module_for
+        self.assertEqual(module_for(0x7B0), "AirCondi")        # J255 HVAC response
+        self.assertEqual(module_for(0x710), "Gatew")           # J533 gateway request
+        self.assertEqual(module_for(0x7E8), "EnginContrModul1")
+
+    def test_decode_sets_module(self):
+        msgs = decode_frames([(0, 0x7B0, h("0562F1874142"))])
+        self.assertEqual(msgs[0].module, "AirCondi")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
