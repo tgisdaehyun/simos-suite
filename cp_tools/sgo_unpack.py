@@ -139,7 +139,16 @@ def _bcb_decompress(stream: bytes) -> Tuple[Optional[bytes], Optional[int]]:
         flag 0 = literal (copy len bytes)
         flag 1 = RLE   (repeat next byte len times)
         flag 3 = end   (followed by a 24-bit checksum of the output)
-    Returns (output, end_checksum) or (None, None) on a malformed stream."""
+    Returns (output, end_checksum) or (None, None) on a malformed stream.
+
+    KNOWN GAP: this u16/2-bit-flag token model does NOT match VW's real on-disk
+    crypt=0x10 BCB streams, which use a different 1A-escape token scheme (e.g.
+    recurring 1A 04 04 / 1A 06 06). No surveyed real .sgo block decodes through
+    here — real crypt=0x10 blocks currently fall to the plain/AES branch in
+    _decode_block. cp_tools.bcb_compress is the exact inverse of THIS function
+    (round-trips through it), but is likewise not VW-format. Reversing the real
+    1A-escape codec is open work; until then crypt=0x10 packing is not
+    flash-accurate (prefer the plain crypt=0x00 path)."""
     p, out = 0, bytearray()
     while p + 2 <= len(stream):
         tok = struct.unpack_from(">H", stream, p)[0]
