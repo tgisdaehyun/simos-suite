@@ -88,14 +88,42 @@ HVAC_HI0113_PATCH: List[PatchSite] = [
               0x6957a, bytes.fromhex("e34f1453"), bytes.fromhex("01520000")),
 ]
 
-# 2-zone (LOW) — FL_4G0820043LO_0113, block1 = 741,376 B. Structural twin of HI;
-# both patch sites use the entry-force form (overwrite the first instruction with
-# "mov <val>,r10 ; jmp [lp]"), which returns immediately regardless of the prologue.
+# 2-zone (LOW) — FL_4G0820043LO_0113, block1 = 741,376 B.
+# CORRECTED 2026-06-16 (adversarial verify wmd8amokk + producer derivation wx44j6x3o).
+# The earlier 2-site (cand1 + cand3) patch was WRONG and is replaced:
+#   * cand3 (FUN_00069d08 -> 1) was COUNTERPRODUCTIVE — FUN_00069d08 returns {0,3} (a
+#     pending-request latch over gp-0x7c72, NOT a StateOfAuthe enum; the HI 0..3 enum does
+#     not exist in LO). Its only consumer, the auth state machine FUN_0006dd54, needs ==3
+#     to set the valid flag -0x7c17=1; forcing it to 1 JAMMED -0x7c17 at 0 forever.
+#   * The 2-site patch also missed the direct -0x7c17 readers (flap solver FUN_00069362,
+#     actuator gate FUN_0006afb8, UDS FUN_0006f32a/FUN_000752f8) and boot-reset re-clear.
+# Correct fix = keep cand1 (getter -> 0x0C) + NOP the two BNE guards in FUN_0006dd54's
+# default case (phase!=2 and FUN_00069d08()!=3 early-outs) so the firmware's OWN auth-grant
+# (mov 1,r9; st.b r9,-0x7c17  /  mov 3,r8; st.b r8,-0x7c16) runs unconditionally. Then ALL
+# readers see authenticated and it re-establishes every power-on. Bench-confirm the brief
+# key-on limp transient before the state-walk reaches the grant (~20 heartbeats).
 HVAC_LO0113_PATCH: List[PatchSite] = [
     PatchSite("cand1 getter FUN_00069d16 -> return 0x0C",
               0x59d16, bytes.fromhex("80072100"), bytes.fromhex("0c527f00")),
-    PatchSite("cand3 enum FUN_00069d08 -> StateOfAuthe Valid",
-              0x59d08, bytes.fromhex("04478e83"), bytes.fromhex("01527f00")),
+    PatchSite("guard1 NOP: phase!=2 early-out in FUN_0006dd54 (force auth-grant)",
+              0x5e118, bytes.fromhex("da0d"), bytes.fromhex("0000")),
+    PatchSite("guard2 NOP: FUN_00069d08()!=3 early-out in FUN_0006dd54 (force auth-grant)",
+              0x5e120, bytes.fromhex("9a0d"), bytes.fromhex("0000")),
+]
+
+# OPTIONAL erase-gate-open patch (LO_0113) — OPT-IN for the bench/recovery workflow only.
+# Forces FUN_00061e04 @0x61e04 to always return 0 ('mov r29,r10' 0x501d -> 'mov r0,r10' 0x5000),
+# so the EraseMemory gate FUN_0005ce44 always takes its proceed path ({0,0x18}) regardless of
+# CP-record state. Lets a bench-flashed unit then accept FUTURE in-car UDS reflashes (no re-pull).
+# Derived + adversarially verified (workflow w1193w22j 2026-06-16). Polarity facts that this
+# corrects: the gate proceeds ONLY on FUN_00061e04 in {0,0x18} (NOT {3,8}); the limp blocks via
+# gp-0x6930=0 -> FUN_0005625a=8 -> gate 0x21/0x22. FUN_00056414 is a CP-RECORD integrity scanner,
+# NOT AES. The prior '0x22->0x21' idea was WRONG (0x21 is also non-proceed).
+# TRADE-OFF: removes the CP-record integrity interlock before erase (brick risk LOW; the actual
+# write is still gated elsewhere). No upside on a healthy unit — include only deliberately.
+HVAC_LO0113_ERASEGATE: List[PatchSite] = [
+    PatchSite("erase-gate: FUN_00061e04 always return 0 (open EraseMemory)",
+              0x51e44, bytes.fromhex("1d50"), bytes.fromhex("0050")),
 ]
 
 # Known patch sets, tried in order. Auto-selected by which set's original bytes
@@ -122,9 +150,64 @@ def select_patch_set(block1: bytes):
     return None, None
 
 
+# ─── SW-version-portable guard locator (signature, not fixed offset) ──────────
+# The two BNE guards in FUN_0006dd54's default case are the LOAD-BEARING half of the
+# 2-zone patch: NOPing them makes the firmware's OWN auth-grant (mov 1,r9; st.b
+# r9,-0x7c17  /  mov 3,r8; st.b r8,-0x7c16) run unconditionally, latching the unit
+# authenticated and re-establishing it every power-on. Across the ENTIRE 4G0820043
+# 2-zone-class SW history (LO + early HI, builds 0076..0810; 741,376-B image) the pair
+# appears as a UNIQUE signature: guard1 `da 0d bf ff`, four drifting middle bytes, then
+# guard2 `9a 0d bf ff` exactly 8 bytes after guard1 (verified over all 14 such builds —
+# exactly one pair each). The fixed-offset sets above only match SW 0113; this locator
+# extends the load-bearing patch to ANY guard-bearing 2-zone build, e.g. the installed
+# SW 0086, WITHOUT guessing (the pair is unique). cand1 (getter→0x0C) only smooths the
+# brief key-on limp transient and is NOT signature-stable, so the portable patch is
+# guards-only; the latched end state (full climate) is identical. The very early H/L
+# generation (0056/0064/0065) lacks the pair → returns None (different/older CP impl).
+# STILL BENCH-PENDING like the fixed-offset patch — the state-walk-reaches-grant
+# assumption is unchanged; this only ports WHERE the two NOPs land.
+_GUARD1 = bytes.fromhex("da0dbfff")
+_GUARD2 = bytes.fromhex("9a0dbfff")
+_GUARD_SPACING = 8
+
+
+def locate_guard_pair(block1: bytes) -> Optional[int]:
+    """Return the file offset of guard1 for the UNIQUE da0dbfff..(+8)..9a0dbfff pair,
+    or None if the pair is absent. Raises FirmwareMismatch if MORE THAN ONE pair exists
+    (ambiguous — never guess a crypto-gate patch site)."""
+    hits = []
+    i = block1.find(_GUARD1)
+    while i >= 0:
+        if block1[i + _GUARD_SPACING:i + _GUARD_SPACING + 4] == _GUARD2:
+            hits.append(i)
+        i = block1.find(_GUARD1, i + 1)
+    if len(hits) > 1:
+        raise FirmwareMismatch(
+            f"guard signature is AMBIGUOUS: {len(hits)} pairs at "
+            f"{[hex(h) for h in hits]} — re-analyse this SW before patching.")
+    return hits[0] if hits else None
+
+
+def signature_guard_sites(block1: bytes) -> Optional[List[PatchSite]]:
+    """Build the two guard-NOP PatchSites from the signature-located pair (SW-portable,
+    guards-only). Returns None if the pair is absent (not a guard-bearing 2-zone build)."""
+    g1 = locate_guard_pair(block1)
+    if g1 is None:
+        return None
+    g2 = g1 + _GUARD_SPACING
+    return [
+        PatchSite(f"guard1 NOP (sig @0x{g1:05x}): force FUN_0006dd54 auth-grant",
+                  g1, bytes.fromhex("da0d"), bytes.fromhex("0000")),
+        PatchSite(f"guard2 NOP (sig @0x{g2:05x}): force FUN_0006dd54 auth-grant",
+                  g2, bytes.fromhex("9a0d"), bytes.fromhex("0000")),
+    ]
+
+
 def patch_block1(block1: bytes,
                  sites: Optional[List[PatchSite]] = None,
-                 recompute_crc: bool = True) -> bytes:
+                 recompute_crc: bool = True,
+                 extra_sites: Optional[List[PatchSite]] = None,
+                 allow_signature: bool = False) -> bytes:
     """
     Apply the CP-bypass patch to a block-1 image and fix the boot CRC.
 
@@ -132,15 +215,36 @@ def patch_block1(block1: bytes,
     auto-selected by matching original bytes. Raises FirmwareMismatch if the image
     matches no known target — meaning it must be re-analysed before patching (we
     never pattern-guess a crypto-gate patch).
+
+    allow_signature=True (opt-in) adds a fallback for 2-zone-class images whose SW is
+    NOT the fixed-offset 0113 target (e.g. the installed SW 0086): if no fixed set
+    matches, locate the UNIQUE guard pair by signature (locate_guard_pair) and apply
+    the guards-only portable patch. This stays principled (the pair is unique, not a
+    guess) and is the load-bearing half of the fix; cand1 is omitted (transient cover
+    only). Still refuses if the pair is absent or ambiguous.
+
+    extra_sites (optional) are appended after the auto-selected set — used for the
+    opt-in HVAC_LO0113_ERASEGATE patch (open EraseMemory for future in-car reflash).
+    Each extra site's original bytes are verified like any other (FirmwareMismatch
+    if absent), so passing the wrong-variant erase-gate sites is rejected, not silently
+    mis-applied.
     """
     if sites is None:
         name, sites = select_patch_set(block1)
+        if sites is None and allow_signature:
+            sites = signature_guard_sites(block1)   # raises if ambiguous
+            if sites is not None:
+                name = f"signature guards-only @0x{sites[0].offset:05x} (portable, cand1 omitted)"
         if sites is None:
             raise FirmwareMismatch(
                 f"image ({len(block1)} B) matches no known patch set "
-                f"(not FL_4G0820043HI_0113 4-zone nor LO_0113 2-zone). Read it back "
-                f"and re-locate the getter with the V850 static analysis before flashing.")
+                f"(not FL_4G0820043HI_0113 4-zone nor LO_0113 2-zone)"
+                f"{'' if allow_signature else '; pass allow_signature=True to try the portable guard signature'}. "
+                f"Read it back and re-locate the getter with the V850 static analysis before flashing.")
         log.info("auto-selected patch set: %s", name)
+    if extra_sites:
+        sites = list(sites) + list(extra_sites)
+        log.info("appended %d extra patch site(s)", len(extra_sites))
     data = bytearray(block1)
     for s in sites:
         cur = bytes(data[s.offset:s.offset + len(s.orig)])
