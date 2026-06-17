@@ -188,10 +188,10 @@ def _make_connection(ecu: ECUDef, interface: str, interface_path: Optional[str] 
                                   timeout=5.0)
 
     elif interface.upper().startswith("CERBERUS"):
-        # CerberusCAN (Teensy 4.x tri-CAN). Same 0xF1 ISO-TP framing as the ESP32
-        # bridge plus a FlexCAN channel select. Form: "CERBERUS_COM7" or
-        # interface_path="COM7". Defaults to the Drive-Train (500k) channel;
-        # Convenience-CAN (100k) needs VW TP 2.0, which is not implemented yet.
+        # CerberusCAN (Teensy 4.1 tri-CAN) — a request-level serial VCI. Form
+        # "CERBERUS_COM7" or interface_path="COM7". Bus 1 = Powertrain/Diag CAN
+        # (500k, OBD 6/14); the firmware runs the ISO-TP transaction on-device and
+        # returns the assembled response (see transport.cerberus_serial).
         from transport.cerberus_bridge import CerberusConnection, BUS_DRIVE
         if interface_path:
             port = interface_path
@@ -202,13 +202,8 @@ def _make_connection(ecu: ECUDef, interface: str, interface_path: Optional[str] 
                 "CERBERUS requires a port. "
                 "Use interface='CERBERUS_COM7' or interface_path='COM7'."
             )
-        return CerberusConnection(
-            interface_name = port,
-            rxid           = ecu.can_rx,
-            txid           = ecu.can_tx,
-            channel        = BUS_DRIVE,
-            tx_stmin       = max(1, st_min_us // 1000),
-        )
+        return CerberusConnection(port=port, tx_id=ecu.can_tx, rx_id=ecu.can_rx,
+                                  bus=BUS_DRIVE)
 
     else:
         raise ValueError(
