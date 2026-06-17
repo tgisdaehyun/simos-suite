@@ -93,6 +93,16 @@ class TestDecodeBlock(unittest.TestCase):
         data, mode, key, note = _decode_block(blob, 128)
         self.assertEqual(mode, Crypto.AES)
 
+    def test_empty_bcb_not_accepted(self):
+        # a 1A01 header followed by an immediate end-token (checksum 0) decodes to
+        # b"" — must NOT be accepted as a bcb decode (the size guard rejects it,
+        # otherwise sum(b"")==0 trivially matches and yields a false bcb-xor hit).
+        end_tok = struct.pack(">H", 0x3 << 14) + b"\x00\x00\x00"
+        x = b"\x00" * 8 + b"\x1A\x01" + end_tok + bytes(0x4000)
+        blob = _xor(x, b"\xFF")
+        data, mode, key, note = _decode_block(blob, 0x4000)
+        self.assertNotIn(mode, (Crypto.BCB, Crypto.BCB_XOR))
+
     def test_plain(self):
         blob = _xor(b"\x00" * 512, b"\xFF")        # low entropy, no BCB header
         data, mode, key, note = _decode_block(blob, 512)

@@ -145,13 +145,19 @@ def _bcb_decompress(stream: bytes) -> Tuple[Optional[bytes], Optional[int]]:
         tok = struct.unpack_from(">H", stream, p)[0]
         p += 2
         flag, ln = tok >> 14, tok & 0x3FFF
-        if flag == 0:
+        if flag == 0:                          # literal
+            if p + ln > len(stream):
+                return None, None
             out += stream[p:p + ln]
             p += ln
-        elif flag == 1:
+        elif flag == 1:                        # RLE
+            if p >= len(stream):
+                return None, None
             out += bytes([stream[p]]) * ln
             p += 1
-        elif flag == 3:
+        elif flag == 3:                        # end + 24-bit checksum
+            if p + 3 > len(stream):
+                return None, None
             return bytes(out), _w24(stream, p)
         else:
             return None, None
@@ -174,9 +180,9 @@ def _crack_xor_key(stream: bytes, target: int, klen: int) -> bytes:
     return bytes(cols[p].most_common(1)[0][0] ^ target for p in range(klen))
 
 
-def _decode_bcb_block(x: bytes) -> Optional[Tuple[bytes, Crypto, bytes]]:
+def _decode_bcb_block(x: bytes, declen: int) -> Optional[Tuple[bytes, Crypto, bytes]]:
     """Given the 0xFF-XOR'd block (with a `1A 01` BCB header), return
-    (data, mode, key) with the decode checksum-verified, or None."""
+    (data, mode, key) with the decode size- and checksum-verified, or None."""
     i = x.find(b"\x1A\x01")
     if i < 0:
         return None
@@ -184,7 +190,12 @@ def _decode_bcb_block(x: bytes) -> Optional[Tuple[bytes, Crypto, bytes]]:
 
     def verify(stream: bytes) -> Optional[bytes]:
         out, chk = _bcb_decompress(stream)
-        if out is not None and chk is not None and (sum(out) & 0xFFFFFF) == chk:
+        # require a non-empty decode of the expected size (declen is end-start, so
+        # the real length is declen or declen+1) AND a matching 24-bit checksum.
+        # Without the size/non-empty guard, an empty decode trivially passes the
+        # checksum (sum(b"") == 0) and yields a false "bcb-xor" hit over AES.
+        if (out and chk is not None and len(out) in (declen, declen + 1)
+                and (sum(out) & 0xFFFFFF) == chk):
             return out
         return None
 
@@ -210,7 +221,7 @@ def _decode_bcb_block(x: bytes) -> Optional[Tuple[bytes, Crypto, bytes]]:
 def _decode_block(blob: bytes, declen: int) -> Tuple[bytes, Crypto, bytes, str]:
     """Decode one raw block blob. Returns (data, mode, key, note)."""
     x = _xor(blob, b"\xFF")
-    bcb = _decode_bcb_block(x)
+    bcb = _decode_bcb_block(x, declen)
     if bcb is not None:
         data, mode, key = bcb
         note = "key=%r" % key.decode("latin1") if key else "no-key"
