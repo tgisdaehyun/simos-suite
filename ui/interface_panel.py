@@ -214,7 +214,7 @@ class InterfacePanel(tk.Frame):
 
         self._manual_type = tk.StringVar(value="USBISOTP")
         type_menu = ttk.Combobox(row, textvariable=self._manual_type,
-                                 values=["USBISOTP", "CERBERUS", "J2534", "BLE", "SocketCAN"],
+                                 values=["USBISOTP", "CERBERUS"],
                                  width=12, state="readonly", font=("Menlo", 10))
         type_menu.pack(side="left", padx=(0, 6))
         type_menu.bind("<<ComboboxSelected>>", lambda e: self._on_manual_change())

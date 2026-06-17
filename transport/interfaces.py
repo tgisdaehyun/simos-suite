@@ -398,23 +398,10 @@ class InterfaceRegistry:
     def _scan(self):
         self._interfaces.clear()
 
-        # BLE bridge — always listed (BLE is always possible if bleak is installed)
-        try:
-            import bleak  # noqa
-            ble_available = True
-        except ImportError:
-            ble_available = False
-
-        self._interfaces.append(InterfaceInfo(
-            name      = "ESP32 BLE Bridge (BLE_TO_ISOTP20)",
-            interface = "BLE",
-            path      = "",
-            available = ble_available,
-            bus_type  = "BOTH",   # Dual-CAN firmware: flag 0x10 routes to MCP2515
-            notes     = ("Wireless. Requires bleak. Scan for device first.\n"
-                         "Dual-CAN: commands with flag 0x10 route to "
-                         "Convenience CAN (MCP2515 100k)."),
-        ))
+        # USB-first build: only the ESP32 USB bridge, CerberusCAN (Teensy USB) and the
+        # virtual mock are shown. Legacy cables (BLE / J2534 / WiFi) are intentionally
+        # hidden — they weren't part of the tested workflow and made the app look more
+        # capable than it is. Restore from git history if you need them.
 
         # USB ISO-TP (ESP32 over USB serial)
         usb_ports = detect_usb_isotp_ports()
@@ -467,9 +454,9 @@ class InterfaceRegistry:
         except Exception:
             pass
 
-        # J2534 DLLs — show all installed adapters, deduplicated by path
-        # Probe each DLL with PassThruOpen to detect physical cable
-        j2534_dlls = detect_j2534_dlls()
+        # J2534 DLLs — hidden in the USB-first build (restore from git to re-enable).
+        # Probing PassThru cables is also slow on every scan; skipping keeps it snappy.
+        j2534_dlls = []
         seen_paths = set()
         for name, dll_path in j2534_dlls:
             norm = dll_path.lower()
@@ -524,29 +511,7 @@ class InterfaceRegistry:
                 notes        = notes,
             ))
 
-        # FunkBridge WiFi (AP or Station mode)
-        try:
-            from transport.ws_bridge import ws_available, detect_funkbridge_url
-            if ws_available():
-                url = detect_funkbridge_url(timeout=1.0)
-                self._interfaces.append(InterfaceInfo(
-                    name      = f"FunkBridge WiFi ({url or 'not detected'})"
-                                if url else "FunkBridge WiFi (not detected)",
-                    interface = "WIFI",
-                    path      = url or "ws://funkbridge.local/ws",
-                    available = url is not None,
-                    notes     = "FunkBridge WiFi firmware — AP or Station mode",
-                ))
-            else:
-                self._interfaces.append(InterfaceInfo(
-                    name      = "FunkBridge WiFi (websocket-client not installed)",
-                    interface = "WIFI",
-                    path      = "ws://funkbridge.local/ws",
-                    available = False,
-                    notes     = "Run: pip install websocket-client",
-                ))
-        except Exception:
-            pass
+        # (FunkBridge WiFi hidden in the USB-first build — restore from git to re-enable)
 
         # Virtual mock — always available, routes to MockConnection (Simos8.5 sim)
         self._interfaces.append(InterfaceInfo(
