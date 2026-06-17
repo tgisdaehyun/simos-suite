@@ -19,7 +19,7 @@ class TestModuleDb(unittest.TestCase):
     def test_loads(self):
         db = load_module_db()
         self.assertEqual(db["schema"], "c7-module-db-v1")
-        self.assertEqual(len(db["modules"]), 35)
+        self.assertEqual(len(db["modules"]), 36)
 
     def test_required_fields_present(self):
         for m in all_modules():
@@ -47,10 +47,10 @@ class TestModuleDb(unittest.TestCase):
         self.assertIsNone(get_module("4G0000000"))
 
     def test_signed_split(self):
-        # 30 CRC-only, 5 RSA-signed (the security/safety set)
-        self.assertEqual(len(crc_only_modules()), 30)
+        # 31 CRC-only (incl. the J533 gateway), 5 RSA-signed (the security/safety set)
+        self.assertEqual(len(crc_only_modules()), 31)
         self.assertEqual(len(signed_modules()), 5)
-        self.assertEqual(len(crc_only_modules()) + len(signed_modules()), 35)
+        self.assertEqual(len(crc_only_modules()) + len(signed_modules()), 36)
 
     def test_patch_candidates_include_hvac(self):
         cand_parts = {m["part"] for m in patch_candidates()}
