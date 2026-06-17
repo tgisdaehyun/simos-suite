@@ -448,6 +448,25 @@ class InterfaceRegistry:
                 notes     = "Connect ESP32 bridge via USB and check Device Manager.",
             ))
 
+        # CerberusCAN (Teensy 4.x tri-CAN) — host side of the bench tool.
+        # Listed as its own CERBERUS interface (tri-CAN); ISO-TP works, the
+        # Convenience-CAN (VW TP 2.0) capture path is still scaffolding.
+        try:
+            from transport.cerberus_bridge import detect_cerberus_ports
+            for label, port in detect_cerberus_ports():
+                self._interfaces.append(InterfaceInfo(
+                    name         = f"CerberusCAN tri-CAN ({port})",
+                    interface    = f"CERBERUS_{port}",
+                    path         = port,
+                    available    = True,
+                    hw_connected = True,
+                    bus_type     = "BOTH",
+                    notes        = (f"{label}\nTeensy 4.x tri-CAN. ISO-TP works; "
+                                    "Convenience-CAN (VW TP 2.0) capture is scaffolding."),
+                ))
+        except Exception:
+            pass
+
         # J2534 DLLs — show all installed adapters, deduplicated by path
         # Probe each DLL with PassThruOpen to detect physical cable
         j2534_dlls = detect_j2534_dlls()

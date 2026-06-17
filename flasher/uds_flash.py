@@ -60,6 +60,7 @@ def _make_connection(ecu: ECUDef, interface: str, interface_path: Optional[str] 
         "WIFI"           — ESP32 FunkBridge WiFi bridge (pass ws_bridge= a connected WSBridge)
         "J2534"          — J2534 DLL (Tactrix, VNCI, etc.)
         "USBISOTP_COM3"  — ESP32 ISO-TP bridge over USB serial
+        "CERBERUS_COM7"  — CerberusCAN Teensy 4.x tri-CAN bridge (ISO-TP)
         "SocketCAN_can0" — Linux SocketCAN (replace can0 with your interface name)
     """
     params = {"tx_padding": 0x55}
@@ -186,10 +187,33 @@ def _make_connection(ecu: ECUDef, interface: str, interface_path: Optional[str] 
         return WSBridgeConnection(ws_bridge, rx_id=ecu.can_rx, tx_id=ecu.can_tx,
                                   timeout=5.0)
 
+    elif interface.upper().startswith("CERBERUS"):
+        # CerberusCAN (Teensy 4.x tri-CAN). Same 0xF1 ISO-TP framing as the ESP32
+        # bridge plus a FlexCAN channel select. Form: "CERBERUS_COM7" or
+        # interface_path="COM7". Defaults to the Drive-Train (500k) channel;
+        # Convenience-CAN (100k) needs VW TP 2.0, which is not implemented yet.
+        from transport.cerberus_bridge import CerberusConnection, BUS_DRIVE
+        if interface_path:
+            port = interface_path
+        elif "_" in interface:
+            port = interface.split("_", 1)[1]
+        else:
+            raise ValueError(
+                "CERBERUS requires a port. "
+                "Use interface='CERBERUS_COM7' or interface_path='COM7'."
+            )
+        return CerberusConnection(
+            interface_name = port,
+            rxid           = ecu.can_rx,
+            txid           = ecu.can_tx,
+            channel        = BUS_DRIVE,
+            tx_stmin       = max(1, st_min_us // 1000),
+        )
+
     else:
         raise ValueError(
             f"Unknown interface: '{interface}'. "
-            f"Use 'BLE', 'WIFI', 'USBISOTP_COM3', 'J2534', or 'SocketCAN_can0'."
+            f"Use 'BLE', 'WIFI', 'USBISOTP_COM3', 'CERBERUS_COM7', 'J2534', or 'SocketCAN_can0'."
         )
 
 

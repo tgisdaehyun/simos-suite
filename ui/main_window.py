@@ -4145,6 +4145,352 @@ class RawSniffTab(_Tab):
 # MAIN WINDOW
 # ─────────────────────────────────────────────────────────────────────────────
 
+class VehicleTab(_Tab):
+    """Module-centric home: live bus scan (installed list) + the module firmware DB."""
+
+    def __init__(self, parent, mw):
+        super().__init__(parent, mw)
+
+        _section(self, "Installed modules — live bus scan")
+        bar = _frame(self)
+        bar.pack(fill="x", padx=14, pady=(2, 4))
+        self._bus = tk.StringVar(value="ALL")
+        ttk.Combobox(bar, textvariable=self._bus, values=["ALL", "DRIVE", "CONV"],
+                     width=8, state="readonly", font=("Menlo", 10)).pack(side="left")
+        sb = _btn(bar, "Scan bus", self._scan)
+        sb.pack(side="left", padx=6)
+        tip(sb, "Probe every known C7 module address (needs a connection).")
+        self._log = _log_widget(self, height=11)
+
+        _section(self, "Module firmware DB")
+        sbar = _frame(self)
+        sbar.pack(fill="x", padx=14, pady=(2, 4))
+        self._q = tk.StringVar()
+        e = tk.Entry(sbar, textvariable=self._q, bg=C["bg"], fg=C["text"],
+                     insertbackground=C["text"], font=("Menlo", 10), bd=0,
+                     highlightbackground=C["border"], highlightthickness=1)
+        e.pack(side="left", fill="x", expand=True, ipady=3)
+        e.bind("<Return>", lambda _e: self._search())
+        _btn(sbar, "Search", self._search).pack(side="left", padx=(6, 0))
+        _btn(sbar, "CP candidates", self._candidates).pack(side="left", padx=(6, 0))
+        self._dblog = _log_widget(self, height=9)
+        self._ui(self._search)
+
+    def _scan(self):
+        if not self.mw.connected:
+            self._append_log(self._log, "Not connected — connect an interface first.\n", "warn")
+            return
+        self._clear_log(self._log)
+        self._append_log(self._log, "Scanning known modules…\n", "hdr")
+        iface = self.mw.interface or "J2534"
+        path = self.mw.iface_path
+        bus = None if self._bus.get() == "ALL" else self._bus.get()
+
+        def cb(dm):
+            self._ui(self._append_log, self._log, str(dm) + "\n",
+                     "ok" if dm.present else "dim")
+
+        def work():
+            try:
+                from core.module_scan import scan_modules
+                res = scan_modules(iface, path, only_bus=bus, timeout=1.5, callback=cb)
+                n = sum(1 for d in res if d.present)
+                self._ui(self._append_log, self._log,
+                         f"\n{n} present / {len(res)} probed.\n", "hdr")
+            except Exception as ex:
+                self._ui(self._append_log, self._log, f"scan error: {ex}\n", "err")
+
+        self._run(work)
+
+    def _search(self):
+        from core.module_db import all_modules
+        self._clear_log(self._dblog)
+        try:
+            mods = all_modules()
+        except Exception as ex:
+            self._append_log(self._dblog, f"DB error: {ex}\n", "err")
+            return
+        q = self._q.get().strip().lower()
+        if q:
+            mods = [m for m in mods
+                    if q in " ".join(str(v) for v in m.values()).lower()]
+        self._append_log(self._dblog, f"{len(mods)} module(s)\n", "hdr")
+        for m in mods:
+            self._append_log(self._dblog, self._fmt(m) + "\n")
+
+    def _candidates(self):
+        from core.module_db import patch_candidates
+        self._clear_log(self._dblog)
+        try:
+            mods = patch_candidates()
+        except Exception as ex:
+            self._append_log(self._dblog, f"DB error: {ex}\n", "err")
+            return
+        self._append_log(self._dblog, f"{len(mods)} CP-patch candidate(s)\n", "hdr")
+        for m in mods:
+            self._append_log(self._dblog, self._fmt(m) + "\n")
+
+    @staticmethod
+    def _fmt(m):
+        part = m.get("part") or m.get("part_number") or m.get("pn") or "?"
+        name = (m.get("name") or m.get("desc") or m.get("system") or "")
+        arch = m.get("arch") or m.get("cpu") or "?"
+        signed = m.get("signed", m.get("signing", "?"))
+        fmt = m.get("format") or m.get("data_format") or "?"
+        flags = []
+        if m.get("cp_slave") or m.get("cp"):
+            flags.append("CP")
+        if m.get("have_patch") or m.get("patch"):
+            flags.append("patch")
+        tail = ("  [" + ",".join(flags) + "]") if flags else ""
+        return "  %-13s %-24s arch=%-6s signed=%-4s fmt=%s%s" % (
+            part, str(name)[:24], arch, str(signed), fmt, tail)
+
+
+class FlashwareTab(_Tab):
+    """Offline flashware bench — FRF/ODX/SGO decode + repack. No connection needed."""
+
+    def __init__(self, parent, mw):
+        super().__init__(parent, mw)
+        self._frf_blocks = None
+        self._frf_odx = None
+        self._frf_name = None
+        self._sgo_src = None
+
+        _section(self, "FRF / ODX  —  decode + repack")
+        b = _frame(self)
+        b.pack(fill="x", padx=14, pady=(2, 4))
+        _btn(b, "Open FRF…", self._open_frf).pack(side="left")
+        _btn(b, "Replace block from BIN…", self._replace_block).pack(side="left", padx=6)
+        _btn(b, "Save FRF…", self._save_frf, primary=True).pack(side="left")
+
+        _section(self, "SGO  —  SGML Object File")
+        b2 = _frame(self)
+        b2.pack(fill="x", padx=14, pady=(2, 4))
+        _btn(b2, "Open SGO…", self._open_sgo).pack(side="left")
+        _btn(b2, "Repack SGO…", self._save_sgo, primary=True).pack(side="left", padx=6)
+
+        self._log = _log_widget(self, height=18)
+        self._append_log(
+            self._log,
+            "Offline flashware bench: decode and repack factory containers.\n"
+            "Right-to-repair — signed modules (HVAC RSA, BCM2/DSG AES) repack\n"
+            "structurally but will NOT flash. See research/bin-to-frf-sgo-packing.md.\n\n",
+            "dim")
+
+    def _key_path(self):
+        import pathlib
+        p = pathlib.Path(__file__).resolve().parent.parent / "data" / "frf.key"
+        return str(p) if p.exists() else None
+
+    def _open_frf(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Open FRF", filetypes=[("FRF", "*.frf"), ("All files", "*.*")])
+        if not path:
+            return
+
+        def work():
+            try:
+                import os
+                from flasher.frf_loader import FrfLoader
+                from flasher.payload_codec import parse_segments, detect_codec
+                ld = FrfLoader(self._key_path())
+                blocks = ld.extract_blocks(path)
+                odx = ld.get_odx(path)
+                segs = {s["block_num"]: s for s in parse_segments(odx)
+                        if s["block_num"] is not None}
+                self._frf_blocks = blocks
+                self._frf_odx = odx
+                self._frf_name = os.path.splitext(os.path.basename(path))[0] + ".odx"
+                self._ui(self._clear_log, self._log)
+                self._ui(self._append_log, self._log,
+                         f"Loaded {os.path.basename(path)}\n", "hdr")
+                for bn in sorted(blocks):
+                    s = segs.get(bn, {})
+                    codec = detect_codec(s.get("dfi"), s.get("comp") is not None)
+                    self._ui(self._append_log, self._log,
+                             f"  block {bn}: {len(blocks[bn]):>9,} B   codec={codec}\n", "ok")
+            except Exception as ex:
+                self._ui(self._append_log, self._log, f"open FRF error: {ex}\n", "err")
+
+        self._run(work)
+
+    def _replace_block(self):
+        from tkinter import filedialog, simpledialog
+        if not self._frf_blocks:
+            self._append_log(self._log, "Open an FRF first.\n", "warn")
+            return
+        loaded = ", ".join(map(str, sorted(self._frf_blocks)))
+        bn = simpledialog.askinteger("Replace block",
+                                     f"Block number to replace\n(loaded: {loaded})")
+        if bn is None or bn not in self._frf_blocks:
+            self._append_log(self._log, "Cancelled / unknown block.\n", "warn")
+            return
+        path = filedialog.askopenfilename(
+            title="Replacement BIN", filetypes=[("BIN", "*.bin"), ("All files", "*.*")])
+        if not path:
+            return
+        with open(path, "rb") as f:
+            data = f.read()
+        old = len(self._frf_blocks[bn])
+        self._frf_blocks[bn] = data
+        self._append_log(self._log,
+                         f"block {bn}: {old:,} -> {len(data):,} B  (CRC32 recomputed on save)\n", "ok")
+
+    def _save_frf(self):
+        from tkinter import filedialog
+        if not self._frf_blocks:
+            self._append_log(self._log, "Open an FRF first.\n", "warn")
+            return
+        out = filedialog.asksaveasfilename(title="Save FRF", defaultextension=".frf",
+                                           filetypes=[("FRF", "*.frf")])
+        if not out:
+            return
+
+        def work():
+            try:
+                import pathlib
+                from flasher.frf_pack import frf_pack
+                key = pathlib.Path(self._key_path()).read_bytes()
+                frf = frf_pack(self._frf_blocks, self._frf_odx, key, self._frf_name)
+                with open(out, "wb") as f:
+                    f.write(frf)
+                self._ui(self._append_log, self._log,
+                         f"Wrote {out} ({len(frf):,} B). CRC32 recomputed.\n", "ok")
+                self._ui(self._append_log, self._log,
+                         "Functional pack (deflate differs cosmetically); RSA-signed "
+                         "modules won't flash.\n", "dim")
+            except Exception as ex:
+                self._ui(self._append_log, self._log, f"save FRF error: {ex}\n", "err")
+
+        self._run(work)
+
+    def _open_sgo(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Open SGO", filetypes=[("SGO", "*.sgo"), ("All files", "*.*")])
+        if not path:
+            return
+
+        def work():
+            try:
+                import os
+                from cp_tools.sgo_unpack import parse
+                with open(path, "rb") as f:
+                    src = f.read()
+                self._sgo_src = src
+                sf = parse(src)
+                self._ui(self._clear_log, self._log)
+                self._ui(self._append_log, self._log,
+                         f"Loaded {os.path.basename(path)}\n", "hdr")
+                self._ui(self._append_log, self._log,
+                         f"  PN={getattr(sf, 'part_number', '?')}  "
+                         f"SW={getattr(sf, 'sw_version', '?')}  "
+                         f"blocks={len(sf.blocks)}\n", "ok")
+                for blk in sf.blocks:
+                    self._ui(self._append_log, self._log,
+                             f"  addr=0x{blk.addr:06X} crypt=0x{blk.crypt_byte:02X} "
+                             f"mode={blk.mode.value}  {blk.note}\n")
+            except Exception as ex:
+                self._ui(self._append_log, self._log, f"open SGO error: {ex}\n", "err")
+
+        self._run(work)
+
+    def _save_sgo(self):
+        from tkinter import filedialog
+        if not self._sgo_src:
+            self._append_log(self._log, "Open an SGO first.\n", "warn")
+            return
+        out = filedialog.asksaveasfilename(title="Repack SGO", defaultextension=".sgo",
+                                           filetypes=[("SGO", "*.sgo")])
+        if not out:
+            return
+        try:
+            from cp_tools.sgo_pack import repack, verify_checksum
+            data = repack(self._sgo_src)
+            with open(out, "wb") as f:
+                f.write(data)
+            self._append_log(self._log,
+                             f"Wrote {out} ({len(data):,} B)  byte-exact={data == self._sgo_src}  "
+                             f"checksum-OK={verify_checksum(data)}\n", "ok")
+        except Exception as ex:
+            self._append_log(self._log, f"repack SGO error: {ex}\n", "err")
+
+
+class CPLabTab(_Tab):
+    """Offline Component-Protection cipher bench — gateway AES model + HVAC IKA self-test."""
+
+    def __init__(self, parent, mw):
+        super().__init__(parent, mw)
+
+        _section(self, 'J533 gateway CP cipher  (AES-128, key "LEAR D4 Gateway.")')
+        g = _frame(self)
+        g.pack(fill="x", padx=14, pady=(2, 4))
+        tk.Label(g, text="block (32 hex):", fg=C["muted"], bg=C["bg"],
+                 font=("Menlo", 10)).pack(side="left")
+        self._gw = tk.StringVar(value="01020304050607080807060504030201")
+        tk.Entry(g, textvariable=self._gw, bg=C["bg"], fg=C["text"],
+                 insertbackground=C["text"], font=("Menlo", 10), bd=0,
+                 highlightbackground=C["border"], highlightthickness=1,
+                 width=36).pack(side="left", padx=6, ipady=2)
+        gb = _frame(self)
+        gb.pack(fill="x", padx=14, pady=(0, 4))
+        _btn(gb, "gw_enc", lambda: self._gw_op(True)).pack(side="left")
+        _btn(gb, "gw_dec", lambda: self._gw_op(False)).pack(side="left", padx=6)
+        _btn(gb, "Run KAT", self._gw_kat).pack(side="left")
+
+        _section(self, "HVAC J255 IKA handshake model")
+        hb = _frame(self)
+        hb.pack(fill="x", padx=14, pady=(2, 4))
+        _btn(hb, "Run IKA self-test", self._hvac_selftest).pack(side="left")
+
+        self._log = _log_widget(self, height=15)
+        self._append_log(
+            self._log,
+            "Offline CP cipher models. validate() + BDM-dump ingest need real bench\n"
+            "data (CS / identity / data-flash) and stay CLI/bench-gated. See research/.\n\n",
+            "dim")
+
+    def _gw_op(self, enc):
+        try:
+            from cp_tools.gw_cp_cipher import gw_enc, gw_dec
+            b = bytes.fromhex(self._gw.get().strip().replace(" ", ""))
+            if len(b) != 16:
+                raise ValueError("need exactly 16 bytes (32 hex)")
+            out = (gw_enc if enc else gw_dec)(b)
+            self._append_log(self._log,
+                             f"{'gw_enc' if enc else 'gw_dec'}({b.hex()}) = {out.hex()}\n", "ok")
+        except Exception as ex:
+            self._append_log(self._log, f"error: {ex}\n", "err")
+
+    def _gw_kat(self):
+        self._run_capture("cp_tools.gw_cp_cipher", "selftest")
+
+    def _hvac_selftest(self):
+        self._run_capture("cp_tools.hvac_ika_cipher", "_selftest")
+
+    def _run_capture(self, mod, fn):
+        def work():
+            import io, importlib, contextlib
+            buf = io.StringIO()
+            try:
+                m = importlib.import_module(mod)
+                f = getattr(m, fn)
+                with contextlib.redirect_stdout(buf):
+                    rv = f()
+                self._ui(self._clear_log, self._log)
+                self._ui(self._append_log, self._log, buf.getvalue() or "(no output)\n")
+                self._ui(self._append_log, self._log,
+                         f"\n{mod}.{fn}() -> {rv}\n",
+                         "ok" if (rv or rv is None) else "warn")
+            except Exception as ex:
+                self._ui(self._append_log, self._log, buf.getvalue() or "")
+                self._ui(self._append_log, self._log, f"error: {ex}\n", "err")
+
+        self._run(work)
+
+
 class MainWindow(tk.Tk):
     """
     Root application window.
@@ -4268,10 +4614,13 @@ class MainWindow(tk.Tk):
 
         tab_defs = [
             ("  connect  ",     ConnectTab),
+            ("  vehicle  ",     VehicleTab),
             ("  ecu info  ",    EcuInfoTab),
             ("  flash  ",       FlashTab),
+            ("  flashware  ",   FlashwareTab),
             ("  logger  ",      LoggerTab),
             ("  cp tools  ",    CPToolsTab),
+            ("  cp lab  ",      CPLabTab),
             ("  raw sniff  ",   RawSniffTab),
             ("  diagnostics",   DiagTab),
             ("  trans  ",         TransLoggerTab),
